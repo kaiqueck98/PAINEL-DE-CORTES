@@ -124,6 +124,9 @@
     <h1>Painel de Cortes Prontos</h1>
     <p class="intro">Cole o link de uma pasta do Google Drive para navegar pelas pastas e encontrar seus vídeos.</p>
 
+    <!-- BOTAO AGENDAMENTO - JA COLOCADO PRA VOCE -->
+    <a href="/agendamento" style="display:block;margin-top:20px;padding:16px;border-radius:14px;background:#7c3aed;color:#fff;font-weight:700;text-align:center;text-decoration:none;font-size:1rem">📅 Agendamento Automático - 4 vídeos por dia - 08:00, 12:30, 18:00, 21:00 - Clique aqui</a>
+
     <nav class="social-connections" aria-label="Conectar redes sociais">
       <div class="connection-group">
         <a class="connection-link {% if tiktok_connected %}connected{% else %}disconnected{% endif %}" href="{{ url_for('start_social_oauth', platform='tiktok') }}">
@@ -373,248 +376,49 @@
   <script>
     document.addEventListener("click", async (event) => {
       const socialButton = event.target.closest("[data-social-post]");
-      if (socialButton) {
-        await postSocialVideo(socialButton);
-        return;
-      }
-
+      if (socialButton) { await postSocialVideo(socialButton); return; }
       const improveButton = event.target.closest("[data-improve-video]");
-      if (improveButton) {
-        await improveVideo(improveButton);
-        return;
-      }
-
+      if (improveButton) { await improveVideo(improveButton); return; }
       const sourceButton = event.target.closest("[data-preview-source]");
-      if (sourceButton) {
-        switchVideoSource(sourceButton);
-        return;
-      }
-
+      if (sourceButton) { switchVideoSource(sourceButton); return; }
       const button = event.target.closest("[data-copy-title]");
       if (!button) return;
-
       const card = button.closest(".video");
       const title = card.querySelector("[data-suggested-title]").value;
       const hashtags = card.querySelector("[data-suggested-hashtags]").value;
       const text = `${title}\n${hashtags}`;
       const status = button.nextElementSibling;
       try {
-        if (navigator.clipboard && window.isSecureContext) {
-          await navigator.clipboard.writeText(text);
-        } else {
-          const field = document.createElement("textarea");
-          field.value = text;
-          field.style.position = "fixed";
-          field.style.opacity = "0";
-          document.body.appendChild(field);
-          field.select();
-          const copied = document.execCommand("copy");
-          field.remove();
-          if (!copied) throw new Error("Clipboard copy failed");
+        if (navigator.clipboard && window.isSecureContext) { await navigator.clipboard.writeText(text); }
+        else {
+          const field = document.createElement("textarea"); field.value = text; field.style.position = "fixed"; field.style.opacity = "0"; document.body.appendChild(field); field.select(); const copied = document.execCommand("copy"); field.remove(); if (!copied) throw new Error("Clipboard copy failed");
         }
         status.textContent = "Título e hashtags copiados.";
-      } catch {
-        status.textContent = "Não foi possível copiar. Selecione e copie manualmente.";
-      }
+      } catch { status.textContent = "Não foi possível copiar. Selecione e copie manualmente."; }
     });
-
     async function postSocialVideo(button) {
-      const card = button.closest(".video");
-      const platform = button.dataset.platform;
-      const status = card.querySelector(`[data-social-post-status="${platform}"]`);
-      const title = card.querySelector("[data-suggested-title]").value;
-      const hashtags = card.querySelector("[data-suggested-hashtags]").value;
-      const platformName = platform === "tiktok" ? "TikTok" : "YouTube";
-      button.disabled = true;
-      status.textContent = platform === "tiktok" ? "Preparando rascunho..." : "Preparando publicação...";
-
+      const card = button.closest(".video"); const platform = button.dataset.platform; const status = card.querySelector(`[data-social-post-status="${platform}"]`); const title = card.querySelector("[data-suggested-title]").value; const hashtags = card.querySelector("[data-suggested-hashtags]").value; const platformName = platform === "tiktok" ? "TikTok" : "YouTube"; button.disabled = true; status.textContent = platform === "tiktok" ? "Preparando rascunho..." : "Preparando publicação...";
       try {
         const body = new URLSearchParams({ filename: button.dataset.filename });
-        if (platform === "youtube") {
-          body.set("title", title);
-          body.set("hashtags", hashtags);
-        }
-        const start = await fetch(`/social-post/${platform}/${encodeURIComponent(button.dataset.videoId)}`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/x-www-form-urlencoded",
-            "X-CSRF-Token": document.querySelector('meta[name="csrf-token"]').content
-          },
-          body
-        });
-        const job = await start.json();
-        if (!start.ok) {
-          const action = platform === "tiktok" ? "enviar o rascunho ao" : "iniciar a publicação no";
-          throw new Error(job.error || `Não foi possível ${action} ${platformName}.`);
-        }
-
-        while (true) {
-          await new Promise(resolve => setTimeout(resolve, 1200));
-          const response = await fetch(job.status_url);
-          const state = await response.json();
-          if (!response.ok) throw new Error(state.error || "Não foi possível consultar a publicação.");
-          status.textContent = state.message;
-          if (state.status === "complete") {
-            if (platform === "tiktok" && state.result_status === "inbox") {
-              button.textContent = "Enviado à caixa de entrada do TikTok";
-              return;
-            }
-            if (platform === "tiktok" && state.result_status !== "posted") {
-              throw new Error("O TikTok não confirmou o envio do rascunho.");
-            }
-            button.textContent = `Postado no ${platformName}`;
-            status.textContent = `Postado no ${platformName}`;
-            card.classList.add("posted");
-            const markPostedButton = card.querySelector('input[name="action"][value="mark_posted"]');
-            if (markPostedButton) {
-              const markButton = markPostedButton.form.querySelector("button");
-              markButton.disabled = true;
-              markButton.textContent = "Já postado";
-            }
-            return;
-          }
-          if (state.status === "partial") {
-            button.textContent = `Verificar ${platformName}`;
-            return;
-          }
-          if (state.status === "pending") {
-            button.textContent = `Verificar ${platformName}`;
-            return;
-          }
-          if (state.status === "error") throw new Error(state.message);
-        }
-      } catch (error) {
-        button.disabled = false;
-        const action = platform === "tiktok" ? "enviar rascunho ao" : "publicar no";
-        status.textContent = error.message || `Falha ao ${action} ${platformName}.`;
-      }
+        if (platform === "youtube") { body.set("title", title); body.set("hashtags", hashtags); }
+        const start = await fetch(`/social-post/${platform}/${encodeURIComponent(button.dataset.videoId)}`, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded", "X-CSRF-Token": document.querySelector('meta[name="csrf-token"]').content }, body });
+        const job = await start.json(); if (!start.ok) { const action = platform === "tiktok" ? "enviar o rascunho ao" : "iniciar a publicação no"; throw new Error(job.error || `Não foi possível ${action} ${platformName}.`); }
+        while (true) { await new Promise(resolve => setTimeout(resolve, 1200)); const response = await fetch(job.status_url); const state = await response.json(); if (!response.ok) throw new Error(state.error || "Não foi possível consultar a publicação."); status.textContent = state.message; if (state.status === "complete") { if (platform === "tiktok" && state.result_status === "inbox") { button.textContent = "Enviado à caixa de entrada do TikTok"; return; } if (platform === "tiktok" && state.result_status !== "posted") { throw new Error("O TikTok não confirmou o envio do rascunho."); } button.textContent = `Postado no ${platformName}`; status.textContent = `Postado no ${platformName}`; card.classList.add("posted"); const markPostedButton = card.querySelector('input[name="action"][value="mark_posted"]'); if (markPostedButton) { const markButton = markPostedButton.form.querySelector("button"); markButton.disabled = true; markButton.textContent = "Já postado"; } return; } if (state.status === "partial") { button.textContent = `Verificar ${platformName}`; return; } if (state.status === "pending") { button.textContent = `Verificar ${platformName}`; return; } if (state.status === "error") throw new Error(state.message); }
+      } catch (error) { button.disabled = false; const action = platform === "tiktok" ? "enviar rascunho ao" : "publicar no"; status.textContent = error.message || `Falha ao ${action} ${platformName}.`; }
     }
-
     async function improveVideo(button) {
-      const container = button.nextElementSibling;
-      const progress = container.querySelector("progress");
-      const message = container.querySelector(".improvement-message");
-      const preview = container.nextElementSibling;
-      const player = preview.querySelector("[data-compare-player]");
-      const downloadLink = preview.querySelector(".enhanced-download");
-      container.hidden = false;
-      button.disabled = true;
-      button.textContent = "Preparando...";
-      progress.value = 0;
-      preview.hidden = true;
-      downloadLink.hidden = true;
-
+      const container = button.nextElementSibling; const progress = container.querySelector("progress"); const message = container.querySelector(".improvement-message"); const preview = container.nextElementSibling; const player = preview.querySelector("[data-compare-player]"); const downloadLink = preview.querySelector(".enhanced-download"); container.hidden = false; button.disabled = true; button.textContent = "Preparando..."; progress.value = 0; preview.hidden = true; downloadLink.hidden = true;
       try {
-        const body = new URLSearchParams({
-          filename: button.dataset.filename,
-          duration_ms: button.dataset.durationMs
-        });
-        const start = await fetch(`/improve/${encodeURIComponent(button.dataset.videoId)}`, {
-          method: "POST",
-          headers: { "Content-Type": "application/x-www-form-urlencoded" },
-          body
-        });
-        const job = await start.json();
-        if (!start.ok) throw new Error(job.error || "Não foi possível iniciar a melhoria.");
-
+        const body = new URLSearchParams({ filename: button.dataset.filename, duration_ms: button.dataset.durationMs });
+        const start = await fetch(`/improve/${encodeURIComponent(button.dataset.videoId)}`, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body });
+        const job = await start.json(); if (!start.ok) throw new Error(job.error || "Não foi possível iniciar a melhoria.");
         button.textContent = "Melhorando...";
-        while (true) {
-          await new Promise(resolve => setTimeout(resolve, 900));
-          const response = await fetch(job.status_url);
-          const state = await response.json();
-          if (!response.ok) throw new Error(state.error || "Não foi possível consultar o progresso.");
-          if (state.status === "downloading" && state.progress === 0) {
-            progress.removeAttribute("value");
-          } else {
-            progress.value = state.progress;
-          }
-          message.textContent = state.message;
-          if (state.status === "complete") {
-              preview.hidden = false;
-              downloadLink.href = state.download_url;
-              player.dataset.improvedSrc = state.preview_url;
-              player.dataset.currentSource = "improved";
-              player.dataset.watchedThrough = player.dataset.watchedThrough || "0";
-              player.src = state.preview_url;
-              player.load();
-              const thumbnail = button.closest(".video").querySelector(".thumbnail");
-              if (thumbnail) thumbnail.hidden = true;
-              preview.querySelector('[data-preview-source="original"]').classList.remove("active");
-              preview.querySelector('[data-preview-source="improved"]').classList.add("active");
-              if (!player.dataset.watchListener) {
-                player.addEventListener("timeupdate", () => {
-                  if (player.dataset.currentSource !== "improved" || player.seeking) return;
-                  const currentTime = player.currentTime;
-                  const lastTime = Number(player.dataset.lastObservedTime || 0);
-                  const watchedThrough = Number(player.dataset.watchedThrough || 0);
-                  if (currentTime >= lastTime && currentTime - lastTime <= 1.5 &&
-                      lastTime <= watchedThrough + 0.75) {
-                    player.dataset.watchedThrough = String(Math.max(watchedThrough, currentTime));
-                  }
-                  player.dataset.lastObservedTime = String(currentTime);
-                });
-                player.addEventListener("seeking", () => {
-                  player.dataset.lastObservedTime = String(player.currentTime);
-                });
-                player.addEventListener("ended", () => {
-                  if (player.dataset.currentSource === "improved") {
-                    const watchedThrough = Number(player.dataset.watchedThrough || 0);
-                    const tolerance = Math.min(1, Math.max(0.1, player.duration * 0.02));
-                    if (watchedThrough >= player.duration - tolerance) {
-                      downloadLink.hidden = false;
-                      preview.querySelector(".watch-message").textContent =
-                        "Pré-visualização concluída. O vídeo melhorado está pronto para baixar.";
-                    } else {
-                      preview.querySelector(".watch-message").textContent =
-                        "Assista ao vídeo melhorado do início ao fim para liberar o download.";
-                    }
-                  }
-                });
-                player.addEventListener("error", () => {
-                  preview.querySelector(".watch-message").textContent =
-                    "Não foi possível carregar a pré-visualização deste vídeo.";
-                });
-                player.dataset.watchListener = "true";
-              }
-            button.textContent = "Melhoria concluída";
-            return;
-          }
-          if (state.status === "error") throw new Error(state.message);
-        }
-      } catch (error) {
-        message.textContent = error.message || "Falha ao melhorar o vídeo.";
-        button.disabled = false;
-        button.textContent = "Tentar novamente";
-      }
+        while (true) { await new Promise(resolve => setTimeout(resolve, 900)); const response = await fetch(job.status_url); const state = await response.json(); if (!response.ok) throw new Error(state.error || "Não foi possível consultar o progresso."); if (state.status === "downloading" && state.progress === 0) { progress.removeAttribute("value"); } else { progress.value = state.progress; } message.textContent = state.message; if (state.status === "complete") { preview.hidden = false; downloadLink.href = state.download_url; player.dataset.improvedSrc = state.preview_url; player.dataset.currentSource = "improved"; player.dataset.watchedThrough = player.dataset.watchedThrough || "0"; player.src = state.preview_url; player.load(); const thumbnail = button.closest(".video").querySelector(".thumbnail"); if (thumbnail) thumbnail.hidden = true; preview.querySelector('[data-preview-source="original"]').classList.remove("active"); preview.querySelector('[data-preview-source="improved"]').classList.add("active"); if (!player.dataset.watchListener) { player.addEventListener("timeupdate", () => { if (player.dataset.currentSource !== "improved" || player.seeking) return; const currentTime = player.currentTime; const lastTime = Number(player.dataset.lastObservedTime || 0); const watchedThrough = Number(player.dataset.watchedThrough || 0); if (currentTime >= lastTime && currentTime - lastTime <= 1.5 && lastTime <= watchedThrough + 0.75) { player.dataset.watchedThrough = String(Math.max(watchedThrough, currentTime)); } player.dataset.lastObservedTime = String(currentTime); }); player.addEventListener("seeking", () => { player.dataset.lastObservedTime = String(player.currentTime); }); player.addEventListener("ended", () => { if (player.dataset.currentSource === "improved") { const watchedThrough = Number(player.dataset.watchedThrough || 0); const tolerance = Math.min(1, Math.max(0.1, player.duration * 0.02)); if (watchedThrough >= player.duration - tolerance) { downloadLink.hidden = false; preview.querySelector(".watch-message").textContent = "Pré-visualização concluída. O vídeo melhorado está pronto para baixar."; } else { preview.querySelector(".watch-message").textContent = "Assista ao vídeo melhorado do início ao fim para liberar o download."; } } }); player.addEventListener("error", () => { preview.querySelector(".watch-message").textContent = "Não foi possível carregar a pré-visualização deste vídeo."; }); player.dataset.watchListener = "true"; } button.textContent = "Melhoria concluída"; return; } if (state.status === "error") throw new Error(state.message); }
+      } catch (error) { message.textContent = error.message || "Falha ao melhorar o vídeo."; button.disabled = false; button.textContent = "Tentar novamente"; }
     }
-
     function switchVideoSource(button) {
-      const preview = button.closest(".enhancement-preview");
-      const player = preview.querySelector("[data-compare-player]");
-      const source = button.dataset.previewSource;
-      const nextUrl = source === "original" ? player.dataset.originalSrc : player.dataset.improvedSrc;
-      if (!nextUrl || player.dataset.currentSource === source) return;
-
-      const currentTime = player.currentTime;
-      const resumePlayback = !player.paused;
-      player.pause();
-      player.dataset.currentSource = source;
-      player.src = nextUrl;
-      player.load();
-      preview.querySelectorAll("[data-preview-source]").forEach((sourceButton) => {
-        sourceButton.classList.toggle("active", sourceButton === button);
-      });
-      player.addEventListener("loadedmetadata", () => {
-        if (Number.isFinite(player.duration) && currentTime < player.duration) {
-          player.currentTime = currentTime;
-        }
-        if (resumePlayback) {
-          player.play().catch(() => {
-          preview.querySelector(".watch-message").textContent =
-             "Clique em reproduzir para continuar a pré-visualização.";
-          });
-        }
-      }, { once: true });
+      const preview = button.closest(".enhancement-preview"); const player = preview.querySelector("[data-compare-player]"); const source = button.dataset.previewSource; const nextUrl = source === "original" ? player.dataset.originalSrc : player.dataset.improvedSrc; if (!nextUrl || player.dataset.currentSource === source) return;
+      const currentTime = player.currentTime; const resumePlayback = !player.paused; player.pause(); player.dataset.currentSource = source; player.src = nextUrl; player.load(); preview.querySelectorAll("[data-preview-source]").forEach((sourceButton) => { sourceButton.classList.toggle("active", sourceButton === button); }); player.addEventListener("loadedmetadata", () => { if (Number.isFinite(player.duration) && currentTime < player.duration) { player.currentTime = currentTime; } if (resumePlayback) { player.play().catch(() => { preview.querySelector(".watch-message").textContent = "Clique em reproduzir para continuar a pré-visualização."; }); } }, { once: true });
     }
   </script>
 </body>

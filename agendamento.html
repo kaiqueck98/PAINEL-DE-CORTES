@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agendamento - Painel de Cortes</title>
+<style>
+body{font-family:Arial,sans-serif;background:#0f0f0f;color:#fff;padding:20px;max-width:800px;margin:auto}
+a{color:#4fc3f7}
+input,select,button{padding:10px;margin:5px 0;width:100%;border-radius:8px;border:1px solid #333;background:#1e1e1e;color:#fff}
+button{background:#ff0050;border:none;font-weight:bold;cursor:pointer}
+.card{background:#1e1e1e;padding:15px;border-radius:12px;margin:15px 0}
+label{font-size:13px;color:#aaa}
+</style>
+</head>
+<body>
+<a href="/">← Voltar pro painel</a>
+<h1>📅 Agendamento Automático</h1>
+<p>4 vídeos por dia, nos melhores horários.</p>
+
+{% if erro %}<p style="color:#ff5252">{{ erro }}</p>{% endif %}
+{% if ok %}<p style="color:#69f0ae">{{ ok }}</p>{% endif %}
+
+<div class="card">
+<h3>+ Novo Agendamento</h3>
+<form method="POST">
+<input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+<label>Cole o link da pasta do Drive</label>
+<input name="folder_link" placeholder="https://drive.google.com/drive/folders/..." required>
+<label>Vídeos por dia</label>
+<input name="videos_per_day" type="number" value="4" min="1" max="10">
+<label>Horários (um por linha)</label>
+<input name="times" value="08:00, 12:30, 18:00, 21:00">
+<p style="font-size:12px;color:#aaa">Deixa assim mesmo, já são os 4 melhores: 08:00, 12:30, 18:00, 21:00</p>
+<label>Destinos</label><br>
+<input type="checkbox" name="destinations" value="youtube" checked style="width:auto"> YouTube<br>
+<input type="checkbox" name="destinations" value="tiktok" checked style="width:auto"> TikTok<br><br>
+<button type="submit" name="action" value="criar">Salvar Agendamento</button>
+</form>
+</div>
+
+<h3>Agendamentos criados</h3>
+{% for s in schedules %}
+<div class="card">
+<b>{{ s.folder_name }}</b><br>
+Horários: {{ ", ".join(s.times) }}<br>
+Por dia: {{ s.videos_per_day }} | Destinos: {{ ", ".join(s.destinations) }}<br>
+Status: <b>{{ s.status }}</b><br>
+Último: {{ s.last_message or "ainda não postou" }}
+<form method="POST" style="display:flex;gap:10px">
+<input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+<input type="hidden" name="schedule_id" value="{{ s.id }}">
+{% if s.status == 'active' %}
+<button type="submit" name="action" value="pausar" style="background:#ff9800">Pausar</button>
+{% else %}
+<button type="submit" name="action" value="ativar" style="background:#00c853">Ativar</button>
+{% endif %}
+<button type="submit" name="action" value="cancelar" style="background:#333">Cancelar</button>
+</form>
+</div>
+{% else %}
+<p>Nenhum agendamento ainda. Cria o primeiro ali em cima.</p>
+{% endfor %}
+</body>
+</html>
