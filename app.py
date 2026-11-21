@@ -417,98 +417,26 @@ def video_quality(video):
 
 
 def score_video(video, marked_good=False):
-    duration_seconds = video_duration_milliseconds(video) / 1000
-
-    if 30 <= duration_seconds <= 90:
-        score = 5
-    elif 20 <= duration_seconds < 30 or 90 < duration_seconds <= 120:
-        score = 4
-    elif 10 <= duration_seconds < 20 or 120 < duration_seconds <= 180:
-        score = 3
-    elif duration_seconds > 0:
-        score = 1.5
-    else:
-        score = 0
-
-    filename = os.path.splitext(video.get("name", ""))[0].casefold()
-    words = {word for word in re.findall(r"[^\W_]+", filename) if len(word) > 2 and not word.isdigit()}
-    title_points = min(len(words), 4) * 0.45
-    title_points += min(len(words & {"corte", "final", "pronto", "reel", "short", "aprovado"}), 2) * 0.35
-    score += min(title_points, 2.5)
-    if video.get("thumbnailLink"):
-        score += 0.5
-    if marked_good:
-        score += 2
-    return round(min(score, 10), 1)
+    # A nota não usa nome, pasta, miniatura ou marcação manual.
+    report = AUTPOST_STORE.latest_content(video.get("id", ""))
+    return report.get("score", 0) if report else 0
 
 
-def _folder_subject(folder_name):
-    subject = unicodedata.normalize("NFC", str(folder_name or ""))
-    subject = re.sub(r"\.(?:mp4|mov|webm|mkv)\b", " ", subject, flags=re.IGNORECASE)
-    subject = re.sub(r"[_\-./]+", " ", subject).strip()
-    subject = re.sub(r"\(\s*\d+\s*\)", "", subject)
-    subject = re.sub(r"\b\d+\b", "", subject)
-    subject = re.sub(r"\b(?:v[ií]deos?|reels?|tiktok|shorts?|mp4|mov|webm|mkv)\b", "", subject, flags=re.IGNORECASE)
-    subject = re.sub(r"[^\w\s]", " ", subject)
-    subject = re.sub(r"\s+", " ", subject).strip(" |:-")
-    if not subject:
-        return "o corte"
-    return subject
+def gerar_titulo(conteudo: dict, filename=None) -> list[str]:
+    """Só aceita análise de conteúdo. Nunca transforma pasta/arquivo em título."""
+    if not isinstance(conteudo, dict):
+        return []
+    copy = conteudo.get("content", conteudo)
+    title = copy.get("title", "").strip()
+    return [title] if copy.get("summary") and title and len(title) <= 70 else []
 
 
-def gerar_titulo(folder_name: str, filename: str | None = None) -> list[str]:
-    """Três sugestões de até 70 caracteres, exclusivamente pelo tema da pasta.
-
-    filename existe apenas por compatibilidade e nunca é fonte de conteúdo.
-    Sem transcrição, as sugestões despertam curiosidade sem inventar fatos.
-    """
-    del filename
-    subject = _folder_subject(folder_name)
-    if subject == "o corte":
-        return ["Você percebeu esse detalhe?", "Esse momento merece sua atenção", "O detalhe que vale rever"]
-    themes = (
-        "Você percebeu esse detalhe em {}?",
-        "Por que esse momento de {} chama atenção?",
-        "Vale rever: esse detalhe de {}",
-    )
-    titles = []
-    for theme in themes:
-        budget = 70 - len(theme.format(""))
-        topic = subject
-        if len(topic) > budget:
-            topic = topic[:budget - 1].rsplit(" ", 1)[0].rstrip() + "…"
-        titles.append(theme.format(topic))
-    return titles
-
-
-def suggest_social_copy(folder_name, filename=None):
-    folder_title = _folder_subject(folder_name)
-    if folder_title == "o corte":
-        folder_title = ""
-
-    suggested_title = gerar_titulo(folder_name, filename)[0]
-    stop_words = {
-        "com", "para", "por", "uma", "uns", "das", "dos", "que",
-        "the", "and", "from", "de", "do", "da", "em",
-    }
-    generic_tags = {"tiktok", "reel", "reels", "short", "shorts", "video", "videos", "mp4"}
-    hashtags = []
-    seen = set()
-    words = re.findall(r"[^\W_]+", folder_title.casefold(), flags=re.UNICODE)
-    for word in words:
-        if len(word) < 3 or word.isdigit() or word in stop_words or word in generic_tags:
-            continue
-        normalized = unicodedata.normalize("NFKD", word)
-        ascii_word = normalized.encode("ascii", "ignore").decode("ascii").strip()
-        if not ascii_word:
-            continue
-        tag = f"#{ascii_word}"
-        if tag.casefold() not in seen:
-            hashtags.append(tag)
-            seen.add(tag.casefold())
-        if len(hashtags) == 8:
-            break
-    return suggested_title, " ".join(hashtags)
+def suggest_social_copy(conteudo, filename=None):
+    titles = gerar_titulo(conteudo)
+    if not titles:
+        return "", ""
+    copy = conteudo.get("content", conteudo)
+    return titles[0], " ".join(copy.get("hashtags", []))
 
 
 def _read_good_video_ids():
@@ -707,15 +635,8 @@ def file_number(filename, fallback_number):
 
 
 def apply_folder_model(video, folder_name, model, fallback_number):
-    suggested_title, suggested_hashtags = suggest_social_copy(folder_name, video.get("name", ""))
-    number = file_number(video.get("name", ""), fallback_number)
-    title_template = model.get("title_template", "").strip()
-    hashtags_template = model.get("hashtags_template", "").strip()
-    if title_template:
-        suggested_title = title_template.replace("{numero}", number)
-    if hashtags_template:
-        suggested_hashtags = hashtags_template.replace("{numero}", number)
-    return suggested_title, suggested_hashtags
+    # Modelos antigos de pasta não podem contaminar o conteúdo detectado.
+    return suggest_social_copy(AUTPOST_STORE.latest_content(video.get("id", "")) or {})
 
 
 def parse_folder_path(value):
@@ -1084,8 +1005,7 @@ def index():
                     fallback_numbers.get(video.get("id"), 1),
                 )
                 video["title_suggestions"] = gerar_titulo(
-                    video.get("folderName", view["folder_name"]),
-                    video.get("name", ""),
+                    AUTPOST_STORE.latest_content(video.get("id", "")) or {}
                 )
             videos = view["videos"]
             if good_filter == "good":
@@ -1633,6 +1553,7 @@ def process_social_post_job(
     hashtags,
     api_key,
     quality_callback=None,
+    content_report=None,
 ):
     workdir = None
     published = False
@@ -1653,7 +1574,7 @@ def process_social_post_job(
             ),
             workdir=workdir,
         )
-        improved = copy_completed_improvement(video_id, workdir) if quality_callback is None else None
+        improved = copy_completed_improvement(video_id, workdir) if quality_callback is None and content_report is None else None
         if improved:
             video_path, upload_name = improved
             update_social_post_job(
@@ -1666,6 +1587,8 @@ def process_social_post_job(
             video_path = os.path.join(workdir, filename)
             download_video_for_social_post(job_id, video_id, api_key, video_path)
 
+        if content_report and autopost.hash_video(video_path) != content_report['sha256']:
+            raise RuntimeError("O vídeo mudou depois da análise de conteúdo; envio interrompido para evitar título incorreto.")
         if quality_callback is not None:
             quality_callback("analisando", f"Analisando {filename}")
             update_social_post_job(job_id, status="processing", progress=25,
@@ -1876,6 +1799,12 @@ def schedule_job_id(schedule_id, slot_time):
 def register_autopost_schedule(schedule):
     if not AUTPOST_SCHEDULER.running:
         return
+    AUTPOST_SCHEDULER.add_job(
+        prepare_schedule_content,
+        trigger=CronTrigger(hour=7, minute=0, timezone=AUTPOST_TIMEZONE),
+        args=(schedule['id'],), id=f"autopost-{schedule['id']}-content",
+        replace_existing=True, coalesce=True, max_instances=1, misfire_grace_time=3600,
+    )
     for slot_time in schedule["times"]:
         hour, minute = (int(value) for value in slot_time.split(":"))
         AUTPOST_SCHEDULER.add_job(
@@ -1899,9 +1828,9 @@ def ensure_autopost_scheduler():
     with AUTPOST_SCHEDULER_LOCK:
         if AUTPOST_SCHEDULER_STARTED:
             return
+        AUTPOST_SCHEDULER.start()
         for schedule in AUTPOST_STORE.list_active_schedules():
             register_autopost_schedule(schedule)
-        AUTPOST_SCHEDULER.start()
         AUTPOST_SCHEDULER_STARTED = True
 
 
@@ -1925,12 +1854,14 @@ def start_scheduled_social_post(item, api_key):
         )
         return
 
-    title = item.get("title_template", "").strip()
-    hashtags = item.get("hashtags_template", "").strip()
-    if not title or not hashtags:
-        generated_title, generated_hashtags = suggest_social_copy(item["folder_name"], filename)
-        title = title or generated_title
-        hashtags = hashtags or generated_hashtags
+    report = item.get('content_report')
+    if not report or not report.get('content'):
+        AUTPOST_STORE.update_history(item['id'], 'falhou', 'Conteúdo não analisado; nenhum título de pasta será usado.',
+                                    None, schedule_now().isoformat(timespec='seconds'))
+        return
+    copy = report['content']
+    title = copy['title']
+    hashtags = copy['caption'] + '\n\n' + ' '.join(copy['hashtags'])
     job_id = uuid.uuid4().hex
     now = time.time()
     failure_message = None
@@ -2017,6 +1948,7 @@ def process_scheduled_social_post(job_id, item, filename, title, hashtags, api_k
             hashtags,
             api_key,
             quality_callback=quality_progress,
+            content_report=item.get('content_report'),
         )
     except (
         OSError,
@@ -2061,6 +1993,31 @@ def process_scheduled_social_post(job_id, item, filename, title, hashtags, api_k
             app.logger.exception("Não foi possível salvar o resultado do agendamento.")
 
 
+def prepare_schedule_content(schedule_id):
+    """Prepara o ranking às 07:00 e ao ativar; os horários só consomem o ranking."""
+    now = schedule_now()
+    schedule = AUTPOST_STORE.get_schedule(schedule_id)
+    if not schedule or schedule['status'] != 'active':
+        return
+    try:
+        api_key = os.environ.get('DRIVE_API_KEY', '').strip()
+        if not api_key:
+            raise RuntimeError('Configure DRIVE_API_KEY.')
+        view = get_folder_view(schedule['folder_id'], api_key)
+        if view.get('warnings'):
+            raise DriveError('Listagem incompleta: ' + '; '.join(view['warnings']))
+        social = load_social_posts()
+        blocked = load_posted_video_ids() | {vid for vid, platforms in social.items()
+                  if any(p.get('status') in {'posted', 'inbox', 'processing'} for p in platforms.values())}
+        autopost.preparar_melhores_do_dia(
+            AUTPOST_STORE, schedule, now.strftime('%Y-%m-%d'), view.get('all_videos', []),
+            lambda vid, path: download_video_for_social_post('analysis', vid, api_key, path), blocked)
+    except Exception as exc:
+        app.logger.error('Falha na preparação de conteúdo: %s', exc)
+        AUTPOST_STORE.finish_slot(schedule_id, now.strftime('%Y-%m-%d'), 'preparacao',
+                                 'failed', str(exc), now.isoformat(timespec='seconds'))
+
+
 def run_schedule_slot(schedule_id, slot_time):
     now = schedule_now()
     run_date = now.strftime("%Y-%m-%d")
@@ -2079,12 +2036,17 @@ def run_schedule_slot(schedule_id, slot_time):
             raise DriveError("Configure DRIVE_API_KEY para acessar os vídeos agendados.")
         schedule = claim["schedule"]
         view = get_folder_view(schedule["folder_id"], api_key)
-        candidates = sorted(
-            view.get("all_videos", view.get("videos", [])),
-            key=lambda video: (
-                video.get("name", "").casefold(),
-                video.get("id", ""),
-            ),
+        if view.get("warnings"):
+            raise DriveError("A listagem de subpastas está incompleta: " + "; ".join(view["warnings"]))
+        social_posts = load_social_posts()
+        blocked = load_posted_video_ids() | {
+            video_id for video_id, platforms in social_posts.items()
+            if any(value.get("status") in {"posted", "inbox", "processing"} for value in platforms.values())
+        }
+        candidates = autopost.preparar_melhores_do_dia(
+            AUTPOST_STORE, schedule, run_date, view.get("all_videos", []),
+            lambda video_id, target: download_video_for_social_post("analysis", video_id, api_key, target),
+            blocked,
         )
         reserved = AUTPOST_STORE.reserve_next_video(
             schedule_id,
@@ -2096,10 +2058,12 @@ def run_schedule_slot(schedule_id, slot_time):
             now_text,
         )
         for item in reserved:
-            item["title_template"] = schedule.get("title_template", "")
-            item["hashtags_template"] = schedule.get("hashtags_template", "")
+            item["content_report"] = next(v for v in candidates if v["id"] == item["video_id"])
             start_scheduled_social_post(item, api_key)
     except (
+        RuntimeError,
+        ValueError,
+        OSError,
         DriveError,
         PostedVideosError,
         SocialPostsError,
@@ -2150,8 +2114,12 @@ def start_social_post(platform, video_id):
     filename = secure_filename(request.form.get("filename", ""))
     if not filename or os.path.splitext(filename)[1].lower() not in VIDEO_EXTENSIONS:
         return jsonify(error="Nome ou formato de vídeo inválido."), 400
-    title = request.form.get("title", "").strip()
-    hashtags = request.form.get("hashtags", "").strip()
+    content_report = AUTPOST_STORE.latest_content(video_id)
+    if not content_report:
+        return jsonify(error="Analise o conteúdo no agendamento automático antes de publicar este vídeo."), 409
+    copy = content_report['content']
+    title = request.form.get("title", "").strip() or copy['title']
+    hashtags = copy['caption'] + '\n\n' + ' '.join(copy['hashtags'])
     if not title:
         return jsonify(error="Preencha o título do vídeo antes de publicar."), 400
     if len(title) > 70:
@@ -2237,6 +2205,7 @@ def start_social_post(platform, video_id):
             hashtags,
             api_key,
         ),
+        kwargs={"content_report": content_report},
         daemon=True,
     )
     try:
@@ -2278,110 +2247,69 @@ def download_video(video_id):
 
 @app.route("/agendamento/sugestoes-titulo", methods=["POST"])
 def sugestoes_titulo_agendamento():
-    token = session.get("csrf_token", "")
-    supplied = request.headers.get("X-CSRF-Token", "")
-    if not token or not supplied or not secrets.compare_digest(token, supplied):
-        return jsonify(error="Sessão expirada. Atualize a página."), 400
-    try:
-        folder_id = extract_folder_id(request.form.get("folder_link", ""))
-        api_key = os.environ.get("DRIVE_API_KEY", "").strip()
-        if not api_key:
-            return jsonify(error="Configure DRIVE_API_KEY para consultar a pasta."), 503
-        folder_name = get_folder_name(folder_id, api_key)
-        _, hashtags = suggest_social_copy(folder_name)
-        return jsonify(titles=gerar_titulo(folder_name), hashtags=hashtags, folder_name=folder_name)
-    except (ValueError, DriveError) as exc:
-        return jsonify(error=str(exc)), 400
+    return jsonify(error="Títulos são gerados apenas após analisar os frames e a transcrição de cada vídeo."), 409
 
 
 # Complemento da tela mantido aqui para não ler nem alterar os templates.
 TITLE_EDITOR_SCRIPT = r"""
 <script>
 (() => {
-  function setup() {
-    const link = document.querySelector('form [name="folder_link"]');
-    if (!link || !link.form || link.form.dataset.titleEditor) return;
-    const form = link.form;
-    form.dataset.titleEditor = 'true';
-    const panel = document.createElement('fieldset');
-    const legend = document.createElement('legend');
-    legend.textContent = 'Título antes de agendar';
-    panel.append(legend);
-    form.append(panel);
-    function field(name, labelText) {
-      let input = form.querySelector('[name="' + name + '"]');
-      if (!input) {
-        input = document.createElement('input');
-        input.name = name;
-        const label = document.createElement('label');
-        label.textContent = labelText + ' ';
-        label.append(input);
-        panel.append(label);
+  const form = document.querySelector('form [name="folder_link"]')?.form;
+  if (form) {
+    for (const name of ['title_template', 'hashtags_template']) {
+      const input = form.querySelector('[name="' + name + '"]');
+      if (input) {
+        input.value = '';
+        input.disabled = true;
+        input.placeholder = 'Gerado individualmente a partir do conteúdo do vídeo';
       }
-      if (input.tagName === 'INPUT') input.type = 'text';
-      input.disabled = false;
-      input.readOnly = false;
-      input.hidden = false;
-      return input;
     }
-    const title = field('title_template', 'Título editável');
-    const tags = field('hashtags_template', 'Hashtags da pasta');
-    title.maxLength = 70;
-    title.required = false; // Campo vazio usa automaticamente o gerador no servidor.
-    const button = document.createElement('button');
-    button.type = 'button';
-    button.textContent = 'Gerar 3 sugestões pela pasta';
-    const choices = document.createElement('div');
-    const status = document.createElement('p');
-    status.setAttribute('role', 'status');
-    const note = document.createElement('p');
-    note.textContent = 'O texto editado será salvo no agendamento. No TikTok, o fluxo atual envia um rascunho: cole o texto ao finalizar no aplicativo.';
-    const copy = document.createElement('button');
-    copy.type = 'button';
-    copy.textContent = 'Copiar título e hashtags para TikTok';
-    copy.onclick = async () => {
-      try {
-        await navigator.clipboard.writeText([title.value, tags.value].filter(Boolean).join('\n'));
-        status.textContent = 'Texto copiado.';
-      } catch (_) { status.textContent = 'Selecione e copie o texto do campo manualmente.'; }
-    };
-    panel.append(button, choices, status, note, copy);
-    button.onclick = async () => {
-      button.disabled = true;
-      status.textContent = 'Consultando o nome da pasta…';
-      choices.replaceChildren();
-      const originalLink = link.value;
-      const originalTags = tags.value;
-      try {
-        const body = new URLSearchParams({folder_link: originalLink});
-        const response = await fetch('__TITLE_ENDPOINT__', {
-          method: 'POST', body,
-          headers: {'X-CSRF-Token': form.querySelector('[name="csrf_token"]')?.value || ''}
-        });
-        const data = await response.json();
-        if (!response.ok) throw new Error(data.error || 'Não foi possível gerar sugestões.');
-        if (link.value !== originalLink) throw new Error('A pasta mudou. Gere as sugestões novamente.');
-        for (const text of data.titles) {
-          const choice = document.createElement('button');
-          choice.type = 'button';
-          choice.textContent = text;
-          choice.onclick = () => {
-            title.value = text;
-            title.dispatchEvent(new Event('input', {bubbles: true}));
-            title.focus();
-          };
-          choices.append(choice);
-        }
-        // Nunca sobrescreve um título que o usuário já editou.
-        if (!title.value.trim()) title.value = data.titles[0];
-        if (tags.value === originalTags && !originalTags.trim()) tags.value = data.hashtags;
-        status.textContent = 'Escolha uma sugestão ou edite seu título (máximo 70 caracteres).';
-      } catch (error) { status.textContent = error.message; }
-      finally { button.disabled = false; }
-    };
   }
-  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', setup);
-  else setup();
+  const host = document.createElement('section');
+  host.className = 'card';
+  const heading = document.createElement('h3');
+  heading.textContent = 'Histórias e seleção do dia';
+  host.append(heading);
+  const body = document.createElement('div'); host.append(body);
+  (document.querySelector('main') || document.body).append(host);
+  async function refreshContent() {
+    try {
+      const response = await fetch('__CONTENT_ENDPOINT__', {headers: {
+        'X-CSRF-Token': document.querySelector('[name="csrf_token"]')?.value || ''
+      }, cache: 'no-store'});
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Erro ao consultar análise');
+      body.replaceChildren();
+      for (const day of data.content.days) {
+        const p = document.createElement('p'); p.textContent = day.status + ': ' + day.message; body.append(p);
+      }
+      for (const video of data.content.videos) {
+        const card = document.createElement('article'); card.className = 'card';
+        const copy = video.content || {};
+        const lines = [video.name + ' | Nota: ' + video.score + ' | ' + (video.selected ? 'ESCOLHIDO' : video.status),
+          'História detectada: ' + (copy.summary || 'Análise ainda indisponível'),
+          'Título: ' + (copy.title || ''), 'Legenda: ' + (copy.caption || ''),
+          'Hashtags: ' + (copy.hashtags || []).join(' '), video.message,
+          'Motivos: ' + (video.reasons || []).join('; ')];
+        if (copy.uncertainty) lines.push('Limitações: ' + copy.uncertainty);
+        if (copy.trend_source) lines.push('Lista de tendências: ' + copy.trend_source + ' | ' + copy.trend_updated_at);
+        for (const line of lines) { const p = document.createElement('p'); p.textContent = line; card.append(p); }
+        if (copy.title) {
+          const button = document.createElement('button'); button.type = 'button';
+          button.textContent = 'Copiar título e hashtags';
+          button.onclick = async () => {
+            try { await navigator.clipboard.writeText(copy.title + '\n' + copy.hashtags.join(' ')); button.textContent = 'Copiado'; }
+            catch (_) { button.textContent = 'Selecione e copie os textos acima'; }
+          };
+          card.append(button);
+        }
+        body.append(card);
+      }
+      if (!data.content.days.length) body.textContent = 'A análise começa no próximo horário agendado.';
+    } catch (error) { body.textContent = error.message; }
+    finally { setTimeout(refreshContent, 5000); }
+  }
+  refreshContent();
 })();
 </script>
 """
@@ -2394,7 +2322,8 @@ def progresso_automatico():
     if not token or not supplied or not secrets.compare_digest(token, supplied):
         return jsonify(error="Atualize a página para acompanhar o progresso."), 403
     try:
-        return jsonify(history=AUTPOST_STORE.list_history(40))
+        return jsonify(history=AUTPOST_STORE.list_history(40),
+                       content=AUTPOST_STORE.content_overview(schedule_now().strftime("%Y-%m-%d")))
     except autopost.AutopostStoreError as exc:
         return jsonify(error=str(exc)), 503
 
@@ -2423,7 +2352,7 @@ def agendamento_page():
                         raise ValueError("Marca pelo menos YouTube ou TikTok.")
                     videos_per_day = int(request.form.get("videos_per_day", "4"))
                     if action == "automatico":
-                        autopost._media_tools()
+                        autopost.validar_analise_conteudo()
                         times = ["08:00", "12:30", "18:00", "21:00"]
                         videos_per_day = 4
                         destinations = ["youtube", "tiktok"]
@@ -2437,14 +2366,8 @@ def agendamento_page():
                     times = sorted(set(times))
                     if any(p not in {"youtube", "tiktok"} for p in destinations):
                         raise ValueError("Destino inválido.")
-                    title_template = request.form.get("title_template", "").strip()
-                    hashtags_template = request.form.get("hashtags_template", "").strip()
-                    if not title_template:
-                        title_template = gerar_titulo(folder_name)[0]
-                    if len(title_template) > 70:
-                        raise ValueError("O título editado deve ter no máximo 70 caracteres.")
-                    if not hashtags_template:
-                        _, hashtags_template = suggest_social_copy(folder_name)
+                    # Cada vídeo terá título/legenda/hashtags próprios. Ignora modelos antigos de pasta.
+                    title_template = hashtags_template = ""
                     sid = AUTPOST_STORE.create_schedule(
                         folder_id, folder_name, videos_per_day, times, destinations,
                         AUTPOST_TIMEZONE_NAME, schedule_now().isoformat(timespec="seconds"),
@@ -2454,6 +2377,7 @@ def agendamento_page():
                     )
                     sched = AUTPOST_STORE.get_schedule(sid)
                     register_autopost_schedule(sched)
+                    threading.Thread(target=prepare_schedule_content, args=(sid,), daemon=True).start()
                     ok = f"Agendamento ativo! {folder_name} - {', '.join(times)} (São Paulo). O próximo horário disponível inicia a análise e o envio."
                 elif action in {"pausar", "ativar", "cancelar"}:
                     sid = request.form.get("schedule_id", "")
@@ -2474,7 +2398,7 @@ def agendamento_page():
         schedules = []
         erro = erro or str(exc)
     html = render_template("agendamento.html", schedules=schedules, erro=erro, ok=ok, csrf_token=get_csrf_token())
-    script = TITLE_EDITOR_SCRIPT.replace("__TITLE_ENDPOINT__", url_for("sugestoes_titulo_agendamento"))
+    script = TITLE_EDITOR_SCRIPT.replace("__CONTENT_ENDPOINT__", url_for("progresso_automatico"))
     # Preserva o título digitado quando outra validação do formulário falhar.
     if erro and request.method == "POST":
         draft = json.dumps({

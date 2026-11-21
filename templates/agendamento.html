@@ -20,7 +20,7 @@ label{display:block;margin:12px 0 6px;font-size:.9rem;font-weight:600}
 <main>
 <a href="/">← Voltar pro painel</a>
 <h1>📅 Agendamento Automático</h1>
-<p style="color:#a1a1aa">4 vídeos por dia nos melhores horários: 08:00, 12:30, 18:00, 21:00</p>
+<p style="color:#a1a1aa">Até 4 melhores vídeos do dia, comparando o conteúdo de todas as subpastas. Envios às 08:00, 12:30, 18:00 e 21:00.</p>
 {% if erro %}<div class="card" style="border-color:#fda4af">{{ erro }}</div>{% endif %}
 {% if ok %}<div class="card" style="border-color:#347653">{{ ok }}</div>{% endif %}
 <div class="card">
@@ -33,19 +33,17 @@ label{display:block;margin:12px 0 6px;font-size:.9rem;font-weight:600}
 <input name="videos_per_day" type="number" value="4" min="1" max="10">
 <label>Horários</label>
 <input name="times" value="08:00, 12:30, 18:00, 21:00">
-<p style="color:#a1a1aa;font-size:.82rem">Deixa assim mesmo, já são os 4 melhores.</p>
-<label>Título editável (máx. 70 caracteres)</label>
-<input name="title_template" maxlength="70" placeholder="Título usado nos vídeos agendados">
-<label>Hashtags da pasta</label>
-<input name="hashtags_template" placeholder="#nome-da-pasta">
+<p style="color:#a1a1aa;font-size:.82rem">A análise diária inicia às 07:00 e ao ativar. Nenhum vídeo é escolhido antes de comparar todo o lote.</p>
+<p>Título, legenda e hashtags são gerados individualmente pelos frames e pela transcrição. Modelos antigos da pasta são ignorados.</p>
 <label>Destinos</label>
 <div class="check"><input type="checkbox" name="destinations" value="youtube" checked> YouTube</div>
 <div class="check"><input type="checkbox" name="destinations" value="tiktok" checked> TikTok</div>
 <br><button type="submit" name="action" value="criar">Salvar Agendamento</button>
 <br><br><button type="submit" name="action" value="automatico">RODAR AUTOMÁTICO</button>
-<p>Usa esta pasta e o título editado (ou gera um automaticamente), sem escolher vídeos.
+<p>Analisa vídeos desta pasta e de todas as subpastas, sem escolher vídeos manualmente.
 Ativa 08:00, 12:30, 18:00 e 21:00, horário de São Paulo. YouTube publica; TikTok recebe rascunho.
-Mantenha o servidor ligado. A análise e a conversão começam no horário; o envio pode levar alguns minutos.</p>
+Mantenha o servidor ligado. A análise de todo o lote e a conversão podem atrasar o envio.
+Os três frames são amostras: a interpretação pode conter incertezas, mostradas abaixo.</p>
 </form>
 </div>
 <section class="card">

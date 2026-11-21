@@ -110,6 +110,13 @@ class MediaTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             autopost.verificar_qualidade(path)
 
+    def test_extracts_three_real_frames_and_signatures(self):
+        source = self.create_media('frames.mp4')
+        frames, hashes = autopost.extrair_frames(source, 2, self.temp.name)
+        self.assertEqual(len(frames), 3)
+        self.assertTrue(all(Path(p).is_file() and Path(p).stat().st_size > 0 for p in frames))
+        self.assertTrue(all(len(value) == 16 for value in hashes))
+
 
 class PipelineTests(unittest.TestCase):
     def test_scheduled_upload_uses_improved_path_both_platforms(self):
@@ -166,13 +173,14 @@ class ScreenTests(StoreTests):
                   social_publishing=social, AUTPOST_TIMEZONE_NAME='America/Sao_Paulo',
                   schedule_now=lambda: datetime.fromisoformat(self.args[-1]),
                   get_csrf_token=lambda: 'test-token', extract_folder_id=lambda link: 'folder',
-                  get_folder_name=lambda *a: 'Ciência VIDEOS 2', register_autopost_schedule=Mock())
+                  get_folder_name=lambda *a: 'Ciência VIDEOS 2', register_autopost_schedule=Mock(),
+                  threading=Mock(), prepare_schedule_content=Mock())
         web.add_url_rule('/suggestions', endpoint='sugestoes_titulo_agendamento', view_func=lambda: '')
         exec(compile(ast.Module(body=[script] + nodes, type_ignores=[]), '<routes>', 'exec'), ns)
         client = web.test_client()
         with client.session_transaction() as sess:
             sess['csrf_token'] = 'test-token'
-        with patch.object(autopost, '_media_tools', return_value=('ffmpeg', 'ffprobe')):
+        with patch.object(autopost, 'validar_analise_conteudo'):
             for _ in range(2):
                 response = client.post('/agendamento', data={'action': 'automatico', 'csrf_token': 'test-token', 'folder_link': 'folder'})
                 self.assertEqual(response.status_code, 200)
@@ -182,9 +190,9 @@ class ScreenTests(StoreTests):
         self.assertEqual(len(schedules), 1)
         self.assertEqual(schedules[0]['times'], self.args[3])
         self.assertEqual(schedules[0]['destinations'], ['youtube', 'tiktok'])
-        self.assertTrue(schedules[0]['title_template'])
+        self.assertEqual(schedules[0]['title_template'], '')
         self.assertEqual(client.get('/agendamento/progresso').status_code, 403)
-        self.assertEqual(client.get('/agendamento/progresso', headers={'X-CSRF-Token': 'test-token'}).json, {'history': []})
+        self.assertEqual(client.get('/agendamento/progresso', headers={'X-CSRF-Token': 'test-token'}).json['history'], [])
 
 
 if __name__ == '__main__':
