@@ -445,7 +445,7 @@ class PanelRouteTests(unittest.TestCase):
                 "TIKTOK_CLIENT_KEY": "client-key",
                 "TIKTOK_CLIENT_SECRET": "client-secret",
                 "TIKTOK_REDIRECT_URI": "http://localhost:5000/oauth/tiktok/callback",
-                "SOCIAL_TOKEN_ENCRYPTION_KEY": Fernet.generate_key().decode("ascii"),
+               "SOCIAL_TOKEN_ENCRYPTION_KEY": os.environ.get("SOCIAL_TOKEN_ENCRYPTION_KEY", "")
             },
         ):
             response = self.client.get("/oauth/tiktok")
