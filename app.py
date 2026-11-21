@@ -2198,6 +2198,55 @@ def stream_original_video(video_id):
 def download_video(video_id):
     return drive_video_response(video_id, as_attachment=True)
 
+@app.route("/agendamento", methods=["GET", "POST"])
+def agendamento_page():
+    erro = None
+    ok = None
+    if request.method == "POST":
+        csrf_token = session.get("csrf_token", "")
+        supplied = request.form.get("csrf_token", "")
+        if not csrf_token or not supplied or not secrets.compare_digest(csrf_token, supplied):
+            erro = "Sessão expirou. Atualiza a página e tenta de novo."
+        else:
+            action = request.form.get("action", "")
+            try:
+                if action == "criar":
+                    folder_link = request.form.get("folder_link", "").strip()
+                    folder_id = extract_folder_id(folder_link)
+                    api_key = os.environ.get("DRIVE_API_KEY", "").strip()
+                    folder_name = get_folder_name(folder_id, api_key)
+                    times_raw = request.form.get("times", "08:00, 12:30, 18:00, 21:00")
+                    times = [t.strip() for t in times_raw.replace("\n", ",").split(",") if t.strip()]
+                    destinations = request.form.getlist("destinations")
+                    if not destinations:
+                        raise ValueError("Marca pelo menos YouTube ou TikTok.")
+                    videos_per_day = int(request.form.get("videos_per_day", "4"))
+                    sid = AUTPOST_STORE.create_schedule(
+                        folder_id, folder_name, videos_per_day, times, destinations,
+                        AUTPOST_TIMEZONE_NAME, schedule_now().isoformat(timespec="seconds")
+                    )
+                    sched = AUTPOST_STORE.get_schedule(sid)
+                    register_autopost_schedule(sched)
+                    ok = f"Agendamento criado! {folder_name} - {', '.join(times)}"
+                elif action in {"pausar", "ativar", "cancelar"}:
+                    sid = request.form.get("schedule_id", "")
+                    novo = {"pausar": "paused", "ativar": "active", "cancelar": "cancelled"}[action]
+                    AUTPOST_STORE.update_schedule_status(sid, novo, schedule_now().isoformat(timespec="seconds"))
+                    if novo != "active":
+                        remove_autopost_schedule_jobs(sid)
+                    else:
+                        sched = AUTPOST_STORE.get_schedule(sid)
+                        if sched:
+                            register_autopost_schedule(sched)
+                    ok = "Atualizado!"
+            except Exception as exc:
+                erro = str(exc)
+    try:
+        schedules = AUTPOST_STORE.list_schedules()
+    except Exception as exc:
+        schedules = []
+        erro = erro or str(exc)
+    return render_template("agendamento.html", schedules=schedules, erro=erro, ok=ok, csrf_token=get_csrf_token())
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
