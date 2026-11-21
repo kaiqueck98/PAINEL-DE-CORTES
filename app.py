@@ -442,28 +442,64 @@ def score_video(video, marked_good=False):
     return round(min(score, 10), 1)
 
 
-def suggest_social_copy(folder_name, filename):
-    file_title = re.sub(r"[_\-.]+", " ", os.path.splitext(filename)[0]).strip()
-    file_title = re.sub(r"\s+", " ", file_title)
-    if file_title:
-        file_title = file_title[0].upper() + file_title[1:]
-    folder_title = re.sub(r"[_\-.]+", " ", folder_name or "").strip()
-    folder_title = re.sub(r"\s+", " ", folder_title)
+def _folder_subject(folder_name):
+    subject = unicodedata.normalize("NFC", str(folder_name or ""))
+    subject = re.sub(r"\.(?:mp4|mov|webm|mkv)\b", " ", subject, flags=re.IGNORECASE)
+    subject = re.sub(r"[_\-./]+", " ", subject).strip()
+    subject = re.sub(r"\(\s*\d+\s*\)", "", subject)
+    subject = re.sub(r"\b\d+\b", "", subject)
+    subject = re.sub(r"\b(?:v[ií]deos?|reels?|tiktok|shorts?|mp4|mov|webm|mkv)\b", "", subject, flags=re.IGNORECASE)
+    subject = re.sub(r"[^\w\s]", " ", subject)
+    subject = re.sub(r"\s+", " ", subject).strip(" |:-")
+    if not subject:
+        return "o corte"
+    return subject
 
-    title_parts = [file_title or "Novo corte"]
-    if folder_title and folder_title.casefold() not in title_parts[0].casefold():
-        title_parts.append(folder_title)
-    suggested_title = " | ".join(title_parts)[:120]
 
-    stop_words = {"com", "para", "por", "uma", "uns", "das", "dos", "que", "the", "and", "from"}
-    words = re.findall(r"[^\W_]+", f"{folder_title} {file_title}".casefold(), flags=re.UNICODE)
-    hashtags = ["#TikTok", "#Reels"]
-    seen = {tag.casefold() for tag in hashtags}
+def gerar_titulo(folder_name: str, filename: str | None = None) -> list[str]:
+    """Três sugestões de até 70 caracteres, exclusivamente pelo tema da pasta.
+
+    filename existe apenas por compatibilidade e nunca é fonte de conteúdo.
+    Sem transcrição, as sugestões despertam curiosidade sem inventar fatos.
+    """
+    del filename
+    subject = _folder_subject(folder_name)
+    if subject == "o corte":
+        return ["Você percebeu esse detalhe?", "Esse momento merece sua atenção", "O detalhe que vale rever"]
+    themes = (
+        "Você percebeu esse detalhe em {}?",
+        "Por que esse momento de {} chama atenção?",
+        "Vale rever: esse detalhe de {}",
+    )
+    titles = []
+    for theme in themes:
+        budget = 70 - len(theme.format(""))
+        topic = subject
+        if len(topic) > budget:
+            topic = topic[:budget - 1].rsplit(" ", 1)[0].rstrip() + "…"
+        titles.append(theme.format(topic))
+    return titles
+
+
+def suggest_social_copy(folder_name, filename=None):
+    folder_title = _folder_subject(folder_name)
+    if folder_title == "o corte":
+        folder_title = ""
+
+    suggested_title = gerar_titulo(folder_name, filename)[0]
+    stop_words = {
+        "com", "para", "por", "uma", "uns", "das", "dos", "que",
+        "the", "and", "from", "de", "do", "da", "em",
+    }
+    generic_tags = {"tiktok", "reel", "reels", "short", "shorts", "video", "videos", "mp4"}
+    hashtags = []
+    seen = set()
+    words = re.findall(r"[^\W_]+", folder_title.casefold(), flags=re.UNICODE)
     for word in words:
-        if len(word) < 3 or word.isdigit() or word in stop_words:
+        if len(word) < 3 or word.isdigit() or word in stop_words or word in generic_tags:
             continue
         normalized = unicodedata.normalize("NFKD", word)
-        ascii_word = normalized.encode("ascii", "ignore").decode("ascii")
+        ascii_word = normalized.encode("ascii", "ignore").decode("ascii").strip()
         if not ascii_word:
             continue
         tag = f"#{ascii_word}"
@@ -1046,6 +1082,10 @@ def index():
                     video.get("folderName", view["folder_name"]),
                     folder_model,
                     fallback_numbers.get(video.get("id"), 1),
+                )
+                video["title_suggestions"] = gerar_titulo(
+                    video.get("folderName", view["folder_name"]),
+                    video.get("name", ""),
                 )
             videos = view["videos"]
             if good_filter == "good":
@@ -1863,10 +1903,12 @@ def start_scheduled_social_post(item, api_key):
         )
         return
 
-    title, hashtags = suggest_social_copy(item["folder_name"], filename)
-    if item["platform"] == "tiktok":
-        title = ""
-        hashtags = ""
+    title = item.get("title_template", "").strip()
+    hashtags = item.get("hashtags_template", "").strip()
+    if not title or not hashtags:
+        generated_title, generated_hashtags = suggest_social_copy(item["folder_name"], filename)
+        title = title or generated_title
+        hashtags = hashtags or generated_hashtags
     job_id = uuid.uuid4().hex
     now = time.time()
     failure_message = None
@@ -1898,6 +1940,8 @@ def start_scheduled_social_post(item, api_key):
                 "workdir": None,
                 "platform": item["platform"],
                 "video_id": video_id,
+                "title": title,
+                "hashtags": hashtags,
             }
 
     if failure_message:
@@ -2023,6 +2067,8 @@ def run_schedule_slot(schedule_id, slot_time):
             now_text,
         )
         for item in reserved:
+            item["title_template"] = schedule.get("title_template", "")
+            item["hashtags_template"] = schedule.get("hashtags_template", "")
             start_scheduled_social_post(item, api_key)
     except (
         DriveError,
@@ -2077,10 +2123,10 @@ def start_social_post(platform, video_id):
         return jsonify(error="Nome ou formato de vídeo inválido."), 400
     title = request.form.get("title", "").strip()
     hashtags = request.form.get("hashtags", "").strip()
-    if platform == "youtube" and not title:
+    if not title:
         return jsonify(error="Preencha o título do vídeo antes de publicar."), 400
-    if platform == "youtube" and len(title) > 100:
-        return jsonify(error="O título do YouTube não pode passar de 100 caracteres."), 400
+    if len(title) > 70:
+        return jsonify(error="O título não pode passar de 70 caracteres."), 400
     if platform == "youtube" and len(hashtags) > 5000:
         return jsonify(error="A descrição do YouTube não pode passar de 5.000 caracteres."), 400
     api_key = os.environ.get("DRIVE_API_KEY", "").strip()
@@ -2147,6 +2193,8 @@ def start_social_post(platform, video_id):
             "workdir": None,
             "platform": platform,
             "video_id": video_id,
+            "title": title,
+            "hashtags": hashtags,
         }
 
     worker = threading.Thread(
@@ -2198,6 +2246,118 @@ def stream_original_video(video_id):
 def download_video(video_id):
     return drive_video_response(video_id, as_attachment=True)
 
+
+@app.route("/agendamento/sugestoes-titulo", methods=["POST"])
+def sugestoes_titulo_agendamento():
+    token = session.get("csrf_token", "")
+    supplied = request.headers.get("X-CSRF-Token", "")
+    if not token or not supplied or not secrets.compare_digest(token, supplied):
+        return jsonify(error="Sessão expirada. Atualize a página."), 400
+    try:
+        folder_id = extract_folder_id(request.form.get("folder_link", ""))
+        api_key = os.environ.get("DRIVE_API_KEY", "").strip()
+        if not api_key:
+            return jsonify(error="Configure DRIVE_API_KEY para consultar a pasta."), 503
+        folder_name = get_folder_name(folder_id, api_key)
+        _, hashtags = suggest_social_copy(folder_name)
+        return jsonify(titles=gerar_titulo(folder_name), hashtags=hashtags, folder_name=folder_name)
+    except (ValueError, DriveError) as exc:
+        return jsonify(error=str(exc)), 400
+
+
+# Complemento da tela mantido aqui para não ler nem alterar os templates.
+TITLE_EDITOR_SCRIPT = r"""
+<script>
+(() => {
+  function setup() {
+    const link = document.querySelector('form [name="folder_link"]');
+    if (!link || !link.form || link.form.dataset.titleEditor) return;
+    const form = link.form;
+    form.dataset.titleEditor = 'true';
+    const panel = document.createElement('fieldset');
+    const legend = document.createElement('legend');
+    legend.textContent = 'Título antes de agendar';
+    panel.append(legend);
+    form.append(panel);
+    function field(name, labelText) {
+      let input = form.querySelector('[name="' + name + '"]');
+      if (!input) {
+        input = document.createElement('input');
+        input.name = name;
+        const label = document.createElement('label');
+        label.textContent = labelText + ' ';
+        label.append(input);
+        panel.append(label);
+      }
+      if (input.tagName === 'INPUT') input.type = 'text';
+      input.disabled = false;
+      input.readOnly = false;
+      input.hidden = false;
+      return input;
+    }
+    const title = field('title_template', 'Título editável');
+    const tags = field('hashtags_template', 'Hashtags da pasta');
+    title.maxLength = 70;
+    title.required = true;
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.textContent = 'Gerar 3 sugestões pela pasta';
+    const choices = document.createElement('div');
+    const status = document.createElement('p');
+    status.setAttribute('role', 'status');
+    const note = document.createElement('p');
+    note.textContent = 'O texto editado será salvo no agendamento. No TikTok, o fluxo atual envia um rascunho: cole o texto ao finalizar no aplicativo.';
+    const copy = document.createElement('button');
+    copy.type = 'button';
+    copy.textContent = 'Copiar título e hashtags para TikTok';
+    copy.onclick = async () => {
+      try {
+        await navigator.clipboard.writeText([title.value, tags.value].filter(Boolean).join('\n'));
+        status.textContent = 'Texto copiado.';
+      } catch (_) { status.textContent = 'Selecione e copie o texto do campo manualmente.'; }
+    };
+    panel.append(button, choices, status, note, copy);
+    button.onclick = async () => {
+      button.disabled = true;
+      status.textContent = 'Consultando o nome da pasta…';
+      choices.replaceChildren();
+      const originalLink = link.value;
+      const originalTags = tags.value;
+      try {
+        const body = new URLSearchParams({folder_link: originalLink});
+        const response = await fetch('__TITLE_ENDPOINT__', {
+          method: 'POST', body,
+          headers: {'X-CSRF-Token': form.querySelector('[name="csrf_token"]')?.value || ''}
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || 'Não foi possível gerar sugestões.');
+        if (link.value !== originalLink) throw new Error('A pasta mudou. Gere as sugestões novamente.');
+        for (const text of data.titles) {
+          const choice = document.createElement('button');
+          choice.type = 'button';
+          choice.textContent = text;
+          choice.onclick = () => {
+            title.value = text;
+            title.dispatchEvent(new Event('input', {bubbles: true}));
+            title.focus();
+          };
+          choices.append(choice);
+        }
+        // Nunca sobrescreve um título que o usuário já editou.
+        if (!title.value.trim()) title.value = data.titles[0];
+        if (tags.value === originalTags && !originalTags.trim()) tags.value = data.hashtags;
+        status.textContent = 'Escolha uma sugestão ou edite seu título (máximo 70 caracteres).';
+      } catch (error) { status.textContent = error.message; }
+      finally { button.disabled = false; }
+    };
+  }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', setup);
+  else setup();
+})();
+</script>
+"""
+
+
 @app.route("/agendamento", methods=["GET", "POST"])
 def agendamento_page():
     erro = None
@@ -2221,9 +2381,19 @@ def agendamento_page():
                     if not destinations:
                         raise ValueError("Marca pelo menos YouTube ou TikTok.")
                     videos_per_day = int(request.form.get("videos_per_day", "4"))
+                    title_template = request.form.get("title_template", "").strip()
+                    hashtags_template = request.form.get("hashtags_template", "").strip()
+                    if not title_template:
+                        title_template = gerar_titulo(folder_name)[0]
+                    if len(title_template) > 70:
+                        raise ValueError("O título editado deve ter no máximo 70 caracteres.")
+                    if not hashtags_template:
+                        _, hashtags_template = suggest_social_copy(folder_name)
                     sid = AUTPOST_STORE.create_schedule(
                         folder_id, folder_name, videos_per_day, times, destinations,
-                        AUTPOST_TIMEZONE_NAME, schedule_now().isoformat(timespec="seconds")
+                        AUTPOST_TIMEZONE_NAME, schedule_now().isoformat(timespec="seconds"),
+                        title_template,
+                        hashtags_template,
                     )
                     sched = AUTPOST_STORE.get_schedule(sid)
                     register_autopost_schedule(sched)
@@ -2246,7 +2416,16 @@ def agendamento_page():
     except Exception as exc:
         schedules = []
         erro = erro or str(exc)
-    return render_template("agendamento.html", schedules=schedules, erro=erro, ok=ok, csrf_token=get_csrf_token())
+    html = render_template("agendamento.html", schedules=schedules, erro=erro, ok=ok, csrf_token=get_csrf_token())
+    script = TITLE_EDITOR_SCRIPT.replace("__TITLE_ENDPOINT__", url_for("sugestoes_titulo_agendamento"))
+    # Preserva o título digitado quando outra validação do formulário falhar.
+    if erro and request.method == "POST":
+        draft = json.dumps({
+            "title_template": request.form.get("title_template", ""),
+            "hashtags_template": request.form.get("hashtags_template", ""),
+        }, ensure_ascii=True).replace("<", "\\u003c")
+        script += "<script>document.addEventListener('DOMContentLoaded', () => {const draft = " + draft + ";for (const [name, value] of Object.entries(draft)) {const input = document.querySelector('form [name=\"' + name + '\"]');if (input) input.value = value;}});</script>"
+    return html.replace("</body>", script + "</body>") if "</body>" in html else html + script
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
