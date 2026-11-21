@@ -23,7 +23,7 @@ from dotenv import load_dotenv
 DOTENV_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
 load_dotenv(dotenv_path=DOTENV_FILE)
 
-from flask import Flask, Response, flash, jsonify, redirect, render_template, request, send_file, session, stream_with_context, url_for
+from flask import Flask, Response, flash, jsonify, redirect, render_template, render_template_string, request, send_file, session, stream_with_context, url_for
 from sqlalchemy import Column, DateTime, Integer, String, Text, create_engine
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import declarative_base, sessionmaker
@@ -419,7 +419,9 @@ def video_quality(video):
 def score_video(video, marked_good=False):
     # A nota não usa nome, pasta, miniatura ou marcação manual.
     report = AUTPOST_STORE.latest_content(video.get("id", ""))
-    return report.get("score", 0) if report else 0
+    if not report:
+        return 0
+    return report.get("score", 0) / (1 if report.get('score_scale') == 10 else 10)
 
 
 def gerar_titulo(conteudo: dict, filename=None) -> list[str]:
@@ -1561,6 +1563,8 @@ def process_social_post_job(
     result_status = None
     upload_completed = False
     upload_started = False
+    asset_messages = [content_report['content']['warning']] if content_report and content_report['content'].get('warning') else []
+    thumbnail = None
     try:
         workdir = tempfile.mkdtemp(prefix="painel-cortes-post-")
         update_social_post_job(
@@ -1574,8 +1578,14 @@ def process_social_post_job(
             ),
             workdir=workdir,
         )
+        prepared = autopost.prepared_media(content_report)
         improved = copy_completed_improvement(video_id, workdir) if quality_callback is None and content_report is None else None
-        if improved:
+        if prepared:
+            upload_name = os.path.basename(prepared)
+            video_path = os.path.join(workdir, upload_name)
+            shutil.copy2(prepared, video_path)
+            update_social_post_job(job_id, message='Usando mídia já analisada e preparada para este horário', progress=25)
+        elif improved:
             video_path, upload_name = improved
             update_social_post_job(
                 job_id,
@@ -1587,13 +1597,13 @@ def process_social_post_job(
             video_path = os.path.join(workdir, filename)
             download_video_for_social_post(job_id, video_id, api_key, video_path)
 
-        if content_report and autopost.hash_video(video_path) != content_report['sha256']:
+        if content_report and not prepared and autopost.hash_video(video_path) != content_report['sha256']:
             raise RuntimeError("O vídeo mudou depois da análise de conteúdo; envio interrompido para evitar título incorreto.")
         if quality_callback is not None:
             quality_callback("analisando", f"Analisando {filename}")
             update_social_post_job(job_id, status="processing", progress=25,
                                    message=f"Analisando resolução, bitrate, desfoque e áudio: {filename}")
-            analysis = autopost.analisar_qualidade(video_path)
+            analysis = content_report['quality'] if prepared else autopost.analisar_qualidade(video_path)
             summary = "Qualidade " + analysis["qualidade"]
             if analysis["motivos"]:
                 summary += ": " + ", ".join(analysis["motivos"])
@@ -1601,8 +1611,9 @@ def process_social_post_job(
             if analysis["qualidade"] == "RUIM":
                 quality_callback("melhorando", summary + " — melhorando nitidez, brilho/contraste e áudio")
                 update_social_post_job(job_id, message=summary + " — melhorando", progress=30)
-                video_path = autopost.melhorar_video(video_path, analise=analysis,
-                                                    output_dir=os.path.join(workdir, "automatico"))
+                if not prepared:
+                    video_path = autopost.melhorar_video(video_path, analise=analysis,
+                                                        output_dir=os.path.join(workdir, "automatico"))
                 upload_name = "video_melhorado.mp4"
                 summary += " | Melhoria aplicada (não garante recuperar detalhes ou áudio ausente)"
             else:
@@ -1614,6 +1625,19 @@ def process_social_post_job(
             converted_path = os.path.join(workdir, f"{os.path.splitext(upload_name)[0]}.mp4")
             convert_video_for_tiktok(video_path, converted_path, job_id)
             video_path = converted_path
+
+        if content_report:
+            if platform == 'youtube':
+                try:
+                    first = autopost.salvar_primeiro_frame(video_path, content_report['sha256'])
+                    thumbnail = autopost.gerar_capa(title, first,
+                        str(autopost.asset_directory(content_report['sha256']) / 'capa_youtube.jpg'))
+                    update_social_post_job(job_id, message='Capa gerada; preparando publicação no YouTube')
+                except Exception as exc:
+                    asset_messages.append('Não foi possível gerar capa: ' + str(exc))
+            else:
+                video_path = autopost.preparar_primeiro_frame_tiktok(video_path, workdir)
+                asset_messages.append('Primeiro frame melhorado na cópia enviada; a seleção da capa no rascunho depende do TikTok.')
 
         token = social_publishing.get_access_token(platform)
 
@@ -1656,6 +1680,12 @@ def process_social_post_job(
             )
             result_status = "posted"
         published = result_status == "posted"
+        if content_report:
+            try:
+                autopost.registrar_historico(content_report, platform, remote_id, result_status,
+                                             title, content_report['content'].get('hashtags', []))
+            except Exception as exc:
+                asset_messages.append('Envio confirmado, mas histórico JSON não foi salvo: ' + str(exc))
         try:
             if platform == "tiktok":
                 record_social_post(video_id, platform, remote_id, status=result_status)
@@ -1680,6 +1710,13 @@ def process_social_post_job(
                 remote_id=remote_id,
             )
             return
+        if platform == 'youtube' and thumbnail:
+            update_social_post_job(job_id, status='processing', progress=96,
+                                   message='Vídeo publicado. Aplicando capa no YouTube...', remote_id=remote_id)
+            try:
+                asset_messages.append(autopost.enviar_capa_youtube(remote_id, thumbnail, token))
+            except Exception as exc:
+                asset_messages.append('Vídeo publicado; capa não confirmada: ' + str(exc))
         if platform == "tiktok" and result_status == "inbox":
             update_social_post_job(
                 job_id,
@@ -1687,7 +1724,7 @@ def process_social_post_job(
                 progress=100,
                 message=(
                     "Rascunho enviado à caixa de entrada do TikTok. "
-                    "Abra a notificação no TikTok para editar e publicar."
+                    "Abra a notificação no TikTok para editar e publicar. " + ' '.join(asset_messages)
                 ),
                 remote_id=remote_id,
                 result_status=result_status,
@@ -1707,7 +1744,7 @@ def process_social_post_job(
             job_id,
             status="complete",
             progress=100,
-            message=message,
+            message=message + ' ' + ' '.join(asset_messages),
             remote_id=remote_id,
             result_status=result_status,
         )
@@ -1859,6 +1896,8 @@ def start_scheduled_social_post(item, api_key):
         AUTPOST_STORE.update_history(item['id'], 'falhou', 'Conteúdo não analisado; nenhum título de pasta será usado.',
                                     None, schedule_now().isoformat(timespec='seconds'))
         return
+    report = autopost.atualizar_hashtags_para_envio(report)
+    item['content_report'] = report
     copy = report['content']
     title = copy['title']
     hashtags = copy['caption'] + '\n\n' + ' '.join(copy['hashtags'])
@@ -2117,6 +2156,7 @@ def start_social_post(platform, video_id):
     content_report = AUTPOST_STORE.latest_content(video_id)
     if not content_report:
         return jsonify(error="Analise o conteúdo no agendamento automático antes de publicar este vídeo."), 409
+    content_report = autopost.atualizar_hashtags_para_envio(content_report)
     copy = content_report['content']
     title = request.form.get("title", "").strip() or copy['title']
     hashtags = copy['caption'] + '\n\n' + ' '.join(copy['hashtags'])
@@ -2250,7 +2290,47 @@ def sugestoes_titulo_agendamento():
     return jsonify(error="Títulos são gerados apenas após analisar os frames e a transcrição de cada vídeo."), 409
 
 
-# Complemento da tela mantido aqui para não ler nem alterar os templates.
+AUTOMATIC_PANEL = r"""
+<!doctype html><html lang="pt-BR"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>Rodar automático — Painel de Cortes</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#0c1019;color:#e9edf5;font:16px system-ui,sans-serif}
+main{max-width:1040px;margin:auto;padding:32px 18px}a{color:#b9adff}.card{padding:22px;margin:18px 0;border:1px solid #303b53;border-radius:16px;background:#151d2c}
+h1{font-size:32px}p{line-height:1.5;overflow-wrap:anywhere}.muted{color:#a9b5cb}.notice{border-left:4px solid #e7b653;padding:12px;background:#292419}
+input,select,button{font:inherit;padding:14px;border-radius:10px;border:1px solid #485572;background:#0e1420;color:#fff;max-width:100%}
+input[type=url]{width:100%;margin:10px 0 18px}button{background:#7051ec;cursor:pointer;font-weight:700}button:disabled{opacity:.5;cursor:wait}
+label{display:block;font-weight:600}.hero button{width:100%;font-size:18px}img{width:320px;max-width:100%;border-radius:12px}
+.steps{color:#b7c8e8;font-size:14px}summary{cursor:pointer}small{color:#a9b5cb}
+</style></head><body><main>
+<a href="/">← Painel e contas conectadas</a><h1>Painel de Cortes · Automático</h1>
+<p class="muted">Até 4 vídeos distintos. Conteúdo → nota → melhoria → título → capa → postagem.</p>
+{% if erro %}<p class="notice" role="alert">{{ erro }}</p>{% endif %}
+{% if ok %}<p class="card" role="status">{{ ok }}</p>{% endif %}
+{% for warning in warnings %}<p class="notice">{{ warning }}</p>{% endfor %}
+<form method="post" class="card hero" id="automatic-form">
+<input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input type="hidden" name="action" value="automatico">
+<label for="folder">Pasta principal do Google Drive</label>
+<input id="folder" name="folder_link" type="url" required value="{{ request.form.get('folder_link','') }}" placeholder="https://drive.google.com/drive/folders/...">
+<button type="submit">RODAR AUTOMÁTICO</button>
+<p>08:00 · 12:30 · 18:00 · 21:00 — horário de São Paulo</p>
+<small>Analisa agora e prepara a mídia para os próximos horários. YouTube publica; TikTok envia rascunho.
+Mantenha o servidor ligado. A nota é técnica, não uma previsão de alcance.</small>
+</form>
+<details class="card"><summary>Agendamentos existentes e controle</summary>
+{% for s in schedules %}<div class="card"><strong>{{ s.folder_name }}</strong><p>{{ s.status }} · {{ ', '.join(s.times) }}</p>
+<p>{{ s.last_message or 'Aguardando' }}</p>
+{% if s.status != 'cancelled' %}<form method="post">
+<input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input type="hidden" name="schedule_id" value="{{ s.id }}">
+<label>Ação no agendamento<select name="action" onchange="if(this.value)this.form.requestSubmit()">
+<option value="">Escolher ação…</option><option value="pausar">Pausar</option><option value="ativar">Ativar</option><option value="cancelar">Cancelar</option>
+</select></label></form>{% endif %}</div>{% else %}<p>Nenhum agendamento criado.</p>{% endfor %}</details>
+<section class="card"><h2>Envios e resultados</h2><div id="upload-history" aria-live="polite">Carregando…</div></section>
+<script>document.getElementById('automatic-form').addEventListener('submit',function(){const b=this.querySelector('button');b.disabled=true;b.textContent='Iniciando…';});</script>
+</main></body></html>
+"""
+
+
+# Interface permanece no app.py para não alterar os outros templates.
 TITLE_EDITOR_SCRIPT = r"""
 <script>
 (() => {
@@ -2279,21 +2359,52 @@ TITLE_EDITOR_SCRIPT = r"""
       }, cache: 'no-store'});
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || 'Erro ao consultar análise');
+      const history = document.getElementById('upload-history');
+      if (history) {
+        history.replaceChildren();
+        for (const row of data.history) {
+          const p = document.createElement('p');
+          p.textContent = `${row.run_date} ${row.run_time} | ${row.video_name} | ${row.platform} | ${row.status}: ${row.message || 'Aguardando'}`;
+          history.append(p);
+        }
+        if (!data.history.length) history.textContent = 'Ainda não há envios.';
+      }
       body.replaceChildren();
+      for (const warning of (data.warnings || [])) {
+        const p = document.createElement('p'); p.className = 'notice'; p.textContent = warning; body.append(p);
+      }
       for (const day of data.content.days) {
         const p = document.createElement('p'); p.textContent = day.status + ': ' + day.message; body.append(p);
       }
       for (const video of data.content.videos) {
         const card = document.createElement('article'); card.className = 'card';
         const copy = video.content || {};
-        const lines = [video.name + ' | Nota: ' + video.score + ' | ' + (video.selected ? 'ESCOLHIDO' : video.status),
+        const score = video.score_scale === 10 ? video.score : video.score / 10;
+        const lines = [video.name + ' | Nota: ' + score.toFixed(1) + '/10 | ' + (video.selected ? 'ESCOLHIDO' : video.status),
           'História detectada: ' + (copy.summary || 'Análise ainda indisponível'),
           'Título: ' + (copy.title || ''), 'Legenda: ' + (copy.caption || ''),
           'Hashtags: ' + (copy.hashtags || []).join(' '), video.message,
           'Motivos: ' + (video.reasons || []).join('; ')];
         if (copy.uncertainty) lines.push('Limitações: ' + copy.uncertainty);
+        if (copy.warning) lines.push('Aviso: ' + copy.warning);
+        if (video.asset_warning) lines.push(video.asset_warning);
+        if (copy.learning?.basis) lines.push(copy.learning.basis);
+        for (const [tag, reason] of Object.entries(copy.hashtag_reasons || {})) {
+          const source = (copy.hashtag_sources || {})[tag] || {};
+          lines.push(`${tag}: ${reason} | ${source.evidence || ''} | ${source.source || ''} | ${source.measured_at || ''}`);
+        }
         if (copy.trend_source) lines.push('Lista de tendências: ' + copy.trend_source + ' | ' + copy.trend_updated_at);
         for (const line of lines) { const p = document.createElement('p'); p.textContent = line; card.append(p); }
+        if (video.thumbnail && video.sha256) {
+          const img = document.createElement('img'); img.src = '__COVER_ENDPOINT__'.replace('SHA', video.sha256);
+          img.alt = 'Capa automática: ' + (copy.title || ''); img.loading = 'lazy'; card.append(img);
+        }
+        if ((video.steps || []).length) {
+          const details = document.createElement('details'); details.className = 'steps';
+          const summary = document.createElement('summary'); summary.textContent = 'Passo a passo'; details.append(summary);
+          for (const text of video.steps) {const p = document.createElement('p'); p.textContent = text; details.append(p);}
+          card.append(details);
+        }
         if (copy.title) {
           const button = document.createElement('button'); button.type = 'button';
           button.textContent = 'Copiar título e hashtags';
@@ -2305,7 +2416,7 @@ TITLE_EDITOR_SCRIPT = r"""
         }
         body.append(card);
       }
-      if (!data.content.days.length) body.textContent = 'A análise começa no próximo horário agendado.';
+      if (!data.content.days.length) {const p = document.createElement('p');p.textContent='Clique em RODAR AUTOMÁTICO para começar a análise.';body.append(p);}
     } catch (error) { body.textContent = error.message; }
     finally { setTimeout(refreshContent, 5000); }
   }
@@ -2322,10 +2433,30 @@ def progresso_automatico():
     if not token or not supplied or not secrets.compare_digest(token, supplied):
         return jsonify(error="Atualize a página para acompanhar o progresso."), 403
     try:
-        return jsonify(history=AUTPOST_STORE.list_history(40),
+        return jsonify(history=AUTPOST_STORE.list_history(40), warnings=automatic_warnings(),
                        content=AUTPOST_STORE.content_overview(schedule_now().strftime("%Y-%m-%d")))
     except autopost.AutopostStoreError as exc:
         return jsonify(error=str(exc)), 503
+
+
+def automatic_warnings():
+    warnings = []
+    if not os.environ.get('OPENROUTER_API_KEY', '').strip():
+        warnings.append('OPENROUTER_API_KEY ausente: o fluxo funciona com título simples da transcrição, sem interpretação visual por IA.')
+    trends = autopost.carregar_tendencias()
+    if trends.get('warning'):
+        warnings.append(trends['warning'])
+    return warnings
+
+
+@app.route('/agendamento/capa/<sha256>')
+def automatic_cover(sha256):
+    if not session.get('csrf_token') or not re.fullmatch(r'[a-f0-9]{64}', sha256):
+        return '', 404
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'autopost_assets', sha256, 'capa.jpg')
+    if not os.path.isfile(path):
+        return '', 404
+    return send_file(path, mimetype='image/jpeg')
 
 
 @app.route("/agendamento", methods=["GET", "POST"])
@@ -2378,7 +2509,7 @@ def agendamento_page():
                     sched = AUTPOST_STORE.get_schedule(sid)
                     register_autopost_schedule(sched)
                     threading.Thread(target=prepare_schedule_content, args=(sid,), daemon=True).start()
-                    ok = f"Agendamento ativo! {folder_name} - {', '.join(times)} (São Paulo). O próximo horário disponível inicia a análise e o envio."
+                    ok = f"Agendamento ativo! {folder_name} - {', '.join(times)} (São Paulo). Análise iniciada; os melhores serão preparados para os próximos horários."
                 elif action in {"pausar", "ativar", "cancelar"}:
                     sid = request.form.get("schedule_id", "")
                     novo = {"pausar": "paused", "ativar": "active", "cancelar": "cancelled"}[action]
@@ -2397,8 +2528,10 @@ def agendamento_page():
     except Exception as exc:
         schedules = []
         erro = erro or str(exc)
-    html = render_template("agendamento.html", schedules=schedules, erro=erro, ok=ok, csrf_token=get_csrf_token())
+    html = render_template_string(AUTOMATIC_PANEL, schedules=schedules, erro=erro, ok=ok,
+                                  warnings=automatic_warnings(), csrf_token=get_csrf_token())
     script = TITLE_EDITOR_SCRIPT.replace("__CONTENT_ENDPOINT__", url_for("progresso_automatico"))
+    script = script.replace('__COVER_ENDPOINT__', url_for('automatic_cover', sha256='SHA'))
     # Preserva o título digitado quando outra validação do formulário falhar.
     if erro and request.method == "POST":
         draft = json.dumps({

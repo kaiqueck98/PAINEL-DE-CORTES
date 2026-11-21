@@ -1,0 +1,44 @@
+{
+  "version": 2,
+  "checked_at": "2026-11-21",
+  "scope": "Medições públicas globais por categoria; não é um ranking exclusivo do Brasil.",
+  "max_age_days": 7,
+  "categories": {
+    "humor": {
+      "keywords": ["humor", "comédia", "comedia", "piada", "engraçado", "risada", "standup"],
+      "hashtags": [
+        {"tag": "#standupcomedy", "source": "https://mixhtag.com/tiktok-hashtags/comedy", "measured_at": "2026-11-20", "evidence": "Classificação Hot; crescimento estimado de 38 mil vídeos por semana."},
+        {"tag": "#relatablecomedy", "source": "https://mixhtag.com/pt/trending-tiktok-hashtags", "measured_at": "2026-11-18", "evidence": "Crescimento semanal de 3,7% na lista consultada."}
+      ]
+    },
+    "novela": {
+      "keywords": ["romance", "romântico", "romantico", "casal", "amor", "namoro"],
+      "note": "Usar somente em histórias românticas; não implica que toda novela seja romance.",
+      "hashtags": [
+        {"tag": "#lovestoryclip", "source": "https://mixhtag.com/pt/trending-tiktok-hashtags", "measured_at": "2026-11-18", "evidence": "Crescimento semanal de 4,2%; tópico Couple & Love."}
+      ]
+    },
+    "memes": {
+      "keywords": ["meme", "memes", "paródia", "parodia", "zoeira", "reação", "reacao"],
+      "hashtags": [
+        {"tag": "#relatablememes", "source": "https://mixhtag.com/tiktok-hashtags/comedy", "measured_at": "2026-11-20", "evidence": "Classificação Hot; crescimento estimado de 16,1 mil vídeos por semana."},
+        {"tag": "#relatablememesforyou", "source": "https://mixhtag.com/pt/trending-tiktok-hashtags", "measured_at": "2026-11-18", "evidence": "Crescimento semanal de 6,3%."}
+      ]
+    },
+    "futebol": {
+      "keywords": ["futebol", "gol", "gols", "jogador", "partida", "goleiro", "torcida", "drible", "treino"],
+      "hashtags": [
+        {"tag": "#futbol", "source": "https://mixhtag.com/tiktok-hashtags/football", "measured_at": "2026-11-21", "evidence": "Classificação Rising; crescimento estimado de 140,5 mil vídeos por semana."},
+        {"tag": "#footballskills", "source": "https://mixhtag.com/tiktok-hashtags/football", "measured_at": "2026-11-21", "evidence": "Classificação Rising; crescimento estimado de 7,9 mil vídeos por semana."},
+        {"tag": "#footballfans", "source": "https://mixhtag.com/tiktok-hashtags/football", "measured_at": "2026-11-21", "evidence": "Classificação Hot; crescimento estimado de 7,4 mil vídeos por semana."}
+      ]
+    },
+    "games": {
+      "keywords": ["game", "jogo", "gameplay", "streamer", "videogame", "minecraft"],
+      "hashtags": [
+        {"tag": "#streamerclips", "source": "https://mixhtag.com/pt/trending-tiktok-hashtags", "measured_at": "2026-11-18", "evidence": "Crescimento semanal de 4,8%."},
+        {"tag": "#gameplayvideo", "source": "https://mixhtag.com/pt/trending-tiktok-hashtags", "measured_at": "2026-11-18", "evidence": "Crescimento semanal de 3,6%."}
+      ]
+    }
+  }
+}

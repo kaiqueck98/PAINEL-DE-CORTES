@@ -100,36 +100,165 @@ def analisar_qualidade(video: str | os.PathLike) -> dict:
 
 _WHISPER_LOCK = threading.Lock()
 _WHISPER_MODEL = None
+_HISTORY_LOCK = threading.RLock()
+
+
+def _history_path() -> Path:
+    return Path(os.environ.get('AUTOPOST_HISTORY_FILE', str(Path(__file__).with_name('historico.json'))))
+
+
+@contextmanager
+def _locked_history(path: Path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with _HISTORY_LOCK, open(str(path) + '.lock', 'a+b') as lock:
+        lock.seek(0, 2)
+        if lock.tell() == 0:
+            lock.write(b'0')
+            lock.flush()
+        lock.seek(0)
+        if os.name == 'nt':
+            import msvcrt
+            msvcrt.locking(lock.fileno(), msvcrt.LK_LOCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            lock.seek(0)
+            if os.name == 'nt':
+                msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+
+def ler_historico() -> list[dict]:
+    path = _history_path()
+    with _locked_history(path):
+        if not path.exists():
+            return []
+        rows = json.loads(path.read_text(encoding='utf-8'))
+        if not isinstance(rows, list) or any(not isinstance(r, dict) for r in rows):
+            raise ValueError('historico.json inválido; não será sobrescrito.')
+        return rows
+
+
+def registrar_historico(report: dict, platform: str, remote_id: str, status: str,
+                       title: str, hashtags: list[str]) -> None:
+    if status not in {'posted', 'inbox'}:
+        return
+    path = _history_path()
+    with _locked_history(path):
+        rows = json.loads(path.read_text(encoding='utf-8')) if path.exists() else []
+        if not isinstance(rows, list) or any(not isinstance(r, dict) for r in rows):
+            raise ValueError('historico.json inválido; não será sobrescrito.')
+        score = report.get('score', 0) / (1 if report.get('score_scale') == 10 else 10)
+        entry = {'video_id': report['id'], 'video': report.get('name', ''), 'sha256': report.get('sha256'),
+                 'title': title, 'hashtags': hashtags, 'date': datetime.now(timezone.utc).isoformat(),
+                 'score': min(10, max(0, score)), 'score_scale': 10, 'platform': platform,
+                 'remote_id': remote_id, 'status': status,
+                 'learning_basis': 'nota técnica; não mede audiência'}
+        key = (entry['video_id'], platform, remote_id)
+        rows = [r for r in rows if (r.get('video_id'), r.get('platform'), r.get('remote_id')) != key]
+        rows.append(entry)
+        handle, temporary = tempfile.mkstemp(dir=str(path.parent), suffix='.json.tmp')
+        try:
+            with os.fdopen(handle, 'w', encoding='utf-8') as file:
+                json.dump(rows, file, ensure_ascii=False, indent=2)
+                file.flush()
+                os.fsync(file.fileno())
+            os.replace(temporary, path)
+        finally:
+            if os.path.exists(temporary):
+                os.remove(temporary)
+
+
+def preferencias_historico() -> dict:
+    try:
+        rows = ler_historico()
+        best = sorted((r for r in rows if r.get('status') in {'posted', 'inbox'}),
+                      key=lambda r: (-float(r.get('score', 0)), r.get('date', '')))
+        unique = {}
+        for row in best:
+            unique.setdefault(row.get('video_id'), row)
+        examples = list(unique.values())[:12]
+        tags, styles = {}, {}
+        for row in examples:
+            title, score = row.get('title', ''), float(row.get('score', 0))
+            style = 'pergunta' if title.endswith('?') else 'frase curta descritiva'
+            styles[style] = styles.get(style, 0) + score
+            for tag in row.get('hashtags', []):
+                tags[tag] = tags.get(tag, 0) + score
+        return {'styles': sorted(styles, key=styles.get, reverse=True),
+                'hashtags': sorted(tags, key=tags.get, reverse=True),
+                'basis': 'Preferências baseadas nas notas técnicas, não em visualizações.', 'warning': ''}
+    except (OSError, ValueError, TypeError) as exc:
+        return {'styles': [], 'hashtags': [], 'basis': '', 'warning': 'Histórico indisponível: ' + str(exc)}
 
 
 def carregar_tendencias() -> dict:
-    """Lista editorial datada; nunca inventa ou afirma verificar tendências externas."""
+    """Só usa medições datadas e com fonte; dados vencidos não impedem publicar."""
     path = Path(os.environ.get("AUTOPOST_TRENDS_FILE", str(Path(__file__).with_name("tendencias.json"))))
+    result = {'hashtags': [], 'metadata': {}, 'categories': {}, 'source': '', 'updated_at': '', 'warning': ''}
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        date = datetime.fromisoformat(data["updated_at"].replace("Z", "+00:00"))
-        if date.tzinfo is None:
-            raise ValueError("data precisa conter fuso horário")
-        age = (datetime.now(timezone.utc) - date).total_seconds()
-        if not 0 <= age <= 48 * 3600:
-            raise ValueError("lista de tendências vencida (validade: 48 horas)")
-        if not isinstance(data.get("source"), str) or not data["source"].strip():
-            raise ValueError("informe a fonte")
-        tags = data["hashtags"]
-        if not isinstance(tags, list) or not 1 <= len(tags) <= 100:
-            raise ValueError("informe de 1 a 100 hashtags")
-        if any(not isinstance(t, str) or not re.fullmatch(r"#[\w]{2,60}", t) for t in tags):
-            raise ValueError("hashtags inválidas")
-        data["hashtags"] = list(dict.fromkeys(tags))
-        return data
+        data = json.loads(path.read_text(encoding='utf-8'))
+        if data.get('version') != 2:
+            raise ValueError('Atualize tendencias.json para o formato por categorias, versão 2.')
+        result['categories'] = data['categories']
+        for category, group in data['categories'].items():
+            for item in group.get('hashtags', []):
+                date = datetime.fromisoformat(item['measured_at'].replace('Z', '+00:00'))
+                if date.tzinfo is None:
+                    date = date.replace(tzinfo=timezone.utc)
+                age = (datetime.now(timezone.utc) - date).total_seconds()
+                if not 0 <= age <= min(7, max(1, int(data.get('max_age_days', 7)))) * 86400:
+                    continue
+                tag = item['tag']
+                if not re.fullmatch(r'#[\w]{2,60}', tag) or not item.get('source', '').startswith('https://') or not item.get('evidence'):
+                    continue
+                result['metadata'][tag] = {**item, 'category': category}
+        result['hashtags'] = list(result['metadata'])[:100]
+        result['source'] = '; '.join(sorted({v['source'] for v in result['metadata'].values()}))
+        result['updated_at'] = max((v['measured_at'] for v in result['metadata'].values()), default='')
+        if not result['hashtags']:
+            result['warning'] = 'Sem tendências recentes verificáveis: publicando sem hashtags em alta.'
     except (OSError, KeyError, TypeError, ValueError) as exc:
-        raise RuntimeError(f"Configure AUTOPOST_TRENDS_FILE com fonte, updated_at e hashtags: {exc}") from exc
+        result['warning'] = f'Tendências indisponíveis: {exc}. Nenhuma hashtag será inventada.'
+    return result
+
+
+def hashtags_simples(text: str, trends: dict) -> tuple[list[str], dict]:
+    words = set(re.findall(r'\w+', text.casefold()))
+    selected, reasons = [], {}
+    for category, group in trends.get('categories', {}).items():
+        matches = words.intersection(k.casefold() for k in group.get('keywords', []))
+        if not matches:
+            continue
+        for entry in group.get('hashtags', []):
+            tag = entry.get('tag')
+            if tag in trends.get('metadata', {}) and tag not in selected:
+                selected.append(tag)
+                reasons[tag] = 'Categoria compatível com a transcrição: ' + ', '.join(sorted(matches))
+                break
+        if len(selected) == 3:
+            break
+    return selected, reasons
+
+
+def atualizar_hashtags_para_envio(report: dict) -> dict:
+    """Revalida a medição no instante do envio, sem reutilizar tendência vencida."""
+    copy = dict(report['content'])
+    trends = carregar_tendencias()
+    previous = copy.get('hashtags', [])
+    copy['hashtags'] = [tag for tag in previous if tag in trends.get('metadata', {})]
+    if copy['hashtags'] != previous:
+        copy['warning'] = (copy.get('warning', '') + ' Hashtags sem medição recente foram removidas antes do envio.').strip()
+    copy['hashtag_sources'] = {tag: trends['metadata'][tag] for tag in copy['hashtags']}
+    return {**report, 'content': copy}
 
 
 def validar_analise_conteudo() -> None:
     _media_tools()
-    if not os.environ.get("OPENAI_API_KEY", "").strip():
-        raise RuntimeError("Configure OPENAI_API_KEY para analisar os frames e a transcrição.")
     import importlib.util
     if importlib.util.find_spec("whisper") is None:
         raise RuntimeError("Instale Whisper no ambiente do painel: python -m pip install openai-whisper")
@@ -188,33 +317,68 @@ def transcrever_whisper(video: str, directory: str, has_audio: bool) -> str:
             raise RuntimeError("Falha no Whisper local; verifique a instalação e o modelo.") from exc
 
 
+_FREE_MODEL_CACHE = (0.0, [])
+
+
+def _free_model(images: bool) -> str:
+    global _FREE_MODEL_CACHE
+    if time.time() - _FREE_MODEL_CACHE[0] > 3600:
+        try:
+            with urlopen('https://openrouter.ai/api/v1/models', timeout=20) as response:
+                _FREE_MODEL_CACHE = (time.time(), json.load(response)['data'])
+        except (OSError, ValueError, KeyError):
+            return 'openrouter/free'
+    for preferred in ('qwen/qwen3.6-plus:free', 'deepseek/deepseek-chat:free'):
+        for model in _FREE_MODEL_CACHE[1]:
+            if model.get('id') == preferred and (not images or 'image' in model.get('architecture', {}).get('input_modalities', [])):
+                if all(float(model.get('pricing', {}).get(p, '1')) == 0 for p in ('prompt', 'completion')):
+                    return preferred
+    return 'openrouter/free'
+
+
 def _content_json(instructions: str, content: list[dict], properties: dict) -> dict:
-    payload = {"model": os.environ.get("CONTENT_VISION_MODEL", "gpt-4.1-mini"), "store": False,
-               "instructions": instructions,
-               "input": [{"role": "user", "content": content}],
-               "text": {"format": {"type": "json_schema", "name": "video_content", "strict": True,
-                          "schema": {"type": "object", "properties": properties,
-                                     "required": list(properties), "additionalProperties": False}}}}
-    key = os.environ.get("OPENAI_API_KEY", "").strip()
+    key = os.environ.get("OPENROUTER_API_KEY", "").strip()
     if not key:
-        raise RuntimeError("OPENAI_API_KEY não configurada.")
-    req = Request("https://api.openai.com/v1/responses", data=json.dumps(payload).encode(),
+        raise RuntimeError("OPENROUTER_API_KEY ausente: usando título simples da transcrição.")
+    messages = []
+    for item in content:
+        if item['type'] == 'input_image':
+            messages.append({'type': 'image_url', 'image_url': {'url': item['image_url']}})
+        else:
+            messages.append({'type': 'text', 'text': item['text']})
+    schema = {'type': 'object', 'properties': properties, 'required': list(properties), 'additionalProperties': False}
+    payload = {'model': _free_model(any(c['type'] == 'image_url' for c in messages)),
+               'messages': [{'role': 'system', 'content': instructions + '\nResponda somente JSON conforme: ' + json.dumps(schema)},
+                            {'role': 'user', 'content': messages}],
+               'response_format': {'type': 'json_object'}, 'max_tokens': 2400,
+               'provider': {'max_price': {'prompt': 0, 'completion': 0}},
+               'temperature': 0.2}
+    req = Request("https://openrouter.ai/api/v1/chat/completions", data=json.dumps(payload).encode(),
                   headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"})
     try:
         with urlopen(req, timeout=180) as response:
             data = json.load(response)
-        if data.get("status") != "completed":
+        choice = data['choices'][0]
+        if choice.get('finish_reason') != 'stop':
             raise ValueError("resposta incompleta")
-        text = ''.join(c.get("text", "") for item in data.get("output", [])
-                       for c in item.get("content", []) if c.get("type") == "output_text")
-        return json.loads(text)
+        result = json.loads(choice['message']['content'])
+        if not isinstance(result, dict) or not all(k in result for k in properties):
+            raise ValueError('JSON fora do formato esperado')
+        for name, rule in properties.items():
+            expected = {'string': str, 'boolean': bool, 'array': list}.get(rule.get('type'))
+            if expected and not isinstance(result[name], expected):
+                raise ValueError('Tipo inválido na resposta')
+            if rule.get('type') == 'array' and any(not isinstance(v, str) for v in result[name]):
+                raise ValueError('Lista inválida na resposta')
+        return result
     except HTTPError as exc:
-        raise RuntimeError(f"Análise de conteúdo indisponível (HTTP {exc.code}); confira chave, modelo e créditos.") from exc
-    except (URLError, TimeoutError, ValueError) as exc:
+        raise RuntimeError(f"OpenRouter gratuito indisponível (HTTP {exc.code}); usando modo simples.") from exc
+    except (URLError, TimeoutError, ValueError, KeyError, IndexError, TypeError) as exc:
         raise RuntimeError("A análise de conteúdo não retornou JSON completo e válido.") from exc
 
 
-def gerar_textos_conteudo(frames: list[str], transcription: str, trends: dict) -> dict:
+def _gerar_textos_ai(frames: list[str], transcription: str, trends: dict) -> dict:
+    preferences = preferencias_historico()
     evidence = [{"type": "input_text", "text": "Transcrição (pode conter erros):\n" + transcription[:50000]}]
     for frame in frames:
         evidence.append({"type": "input_image", "image_url": "data:image/jpeg;base64," +
@@ -232,11 +396,16 @@ def gerar_textos_conteudo(frames: list[str], transcription: str, trends: dict) -
         "Título específico e atraente de até 70 caracteres, sem fatos inventados. "
         "caption_sentences: uma ou duas frases descrevendo a história. Escolha até cinco hashtags "
         "SOMENTE da lista fornecida e somente se pertinentes. Se nenhuma combinar, retorne lista vazia. "
-        "Não acrescente hashtags ao título ou à legenda.",
+        "Não acrescente hashtags ao título ou à legenda. Para cada hashtag, explique em hashtag_reasons "
+        "a ligação específica com o conteúdo; mantenha a mesma ordem. Considere também o contexto de cada categoria. "
+        "Prefira estilos de título e hashtags do histórico quando compatíveis com o conteúdo e com a lista atual; "
+        "a preferência nunca autoriza inventar fatos ou usar uma hashtag irrelevante.",
         [{"type": "input_text", "text": json.dumps({"summary": story["summary"],
-          "uncertainty": story["uncertainty"], "allowed_hashtags": trends["hashtags"]}, ensure_ascii=False)}],
+          "uncertainty": story["uncertainty"], "allowed_hashtags": trends["hashtags"],
+          "hashtag_context": trends.get('metadata', {}), 'history_preferences': preferences}, ensure_ascii=False)}],
         {"title": {"type": "string"}, "caption_sentences": {"type": "array", "items": {"type": "string"}},
-         "hashtags": {"type": "array", "items": {"type": "string"}}})
+         "hashtags": {"type": "array", "items": {"type": "string"}},
+         "hashtag_reasons": {"type": "array", "items": {"type": "string"}}})
     title = copy.get("title", "").strip()
     sentences = copy.get("caption_sentences", [])
     tags = copy.get("hashtags", [])
@@ -244,18 +413,45 @@ def gerar_textos_conteudo(frames: list[str], transcription: str, trends: dict) -
         raise RuntimeError("O modelo gerou título/legenda fora dos limites; vídeo não aprovado.")
     if len(tags) > 5 or any(t not in trends["hashtags"] for t in tags):
         raise RuntimeError("O modelo selecionou hashtags fora da lista de tendências.")
+    if len(copy['hashtag_reasons']) != len(tags) or any(not r.strip() for r in copy['hashtag_reasons']):
+        raise RuntimeError('Justificativa das hashtags incompleta.')
     return {**story, "title": title, "caption": ' '.join(sentences), "hashtags": list(dict.fromkeys(tags)),
+            "hashtag_reasons": dict(zip(tags, copy['hashtag_reasons'])),
+            "hashtag_sources": {t: trends.get('metadata', {}).get(t, {}) for t in tags},
+            "warning": trends.get('warning', ''),
+            'learning': preferences,
             "trend_source": trends["source"], "trend_updated_at": trends["updated_at"]}
+
+
+def gerar_textos_conteudo(frames: list[str], transcription: str, trends: dict) -> dict:
+    try:
+        return {**_gerar_textos_ai(frames, transcription, trends), 'mode': 'openrouter_free'}
+    except (RuntimeError, ValueError, TypeError, KeyError, OSError) as exc:
+        text = re.sub(r'\s+', ' ', transcription).strip()
+        excerpt = re.split(r'(?<=[.!?])\s+', text)[0] if text else ''
+        title = ('Trecho: ' + excerpt) if excerpt else 'Um momento para assistir'
+        if len(title) > 70:
+            title = title[:67].rsplit(' ', 1)[0].rstrip('.,;:') + '…'
+        tags, reasons = hashtags_simples(text, trends)
+        preferences = preferencias_historico()
+        tags.sort(key=lambda tag: preferences['hashtags'].index(tag) if tag in preferences['hashtags'] else 999)
+        return {'summary': ('Trecho transcrito: ' + excerpt[:500]) if excerpt else 'História visual não interpretada: modo simples.',
+                'title': title, 'caption': excerpt[:500] or 'Confira este trecho.', 'hashtags': tags,
+                'hashtag_reasons': reasons, 'hashtag_sources': {t: trends['metadata'][t] for t in tags},
+                'uncertainty': 'Sem interpretação visual por IA; texto simples, sem inferir a história.',
+                'warning': str(exc) + ' ' + trends.get('warning', ''), 'mode': 'simple', 'sufficient': bool(text),
+                'learning': preferences,
+                'trend_source': trends.get('source', ''), 'trend_updated_at': trends.get('updated_at', '')}
 
 
 def pontuar_video(quality: dict) -> tuple[float, list[str]]:
     score, reasons = 0.0, []
     for good, points, explanation in (
-        (min(quality["width"], quality["height"]) >= 720, 25, "resolução ≥720p"),
-        (quality["bitrate"] >= float(os.environ.get("AUTOPOST_MIN_BITRATE", "1500000")), 15, "bitrate adequado"),
-        (quality["blur"] is not None and quality["blur"] <= float(os.environ.get("AUTOPOST_MAX_BLUR", "5")), 25, "sem desfoque detectado"),
-        (15 <= quality["duration"] <= 60, 25, "duração entre 15 e 60 segundos"),
-        (quality["audio_db"] is not None and quality["audio_db"] >= -30, 10, "áudio audível"),
+        (min(quality["width"], quality["height"]) >= 720, 2, "resolução ≥720p"),
+        (quality["bitrate"] >= float(os.environ.get("AUTOPOST_MIN_BITRATE", "1500000")), 1, "bitrate adequado"),
+        (quality["blur"] is not None and quality["blur"] <= float(os.environ.get("AUTOPOST_MAX_BLUR", "5")), 2, "sem desfoque detectado"),
+        (15 <= quality["duration"] <= 60, 3, "duração entre 15 e 60 segundos"),
+        (quality["audio_db"] is not None and quality["audio_db"] >= -30, 1, "áudio audível"),
     ):
         if good:
             score += points
@@ -283,6 +479,109 @@ def conteudo_repetido(report: dict, previous: dict) -> bool:
 
 def verificar_qualidade(video: str | os.PathLike) -> str:
     return analisar_qualidade(video)["qualidade"]
+
+
+def asset_directory(sha256: str) -> Path:
+    if not re.fullmatch(r'[a-f0-9]{64}', sha256):
+        raise ValueError('Identificador de mídia inválido.')
+    directory = Path(__file__).with_name('autopost_assets') / sha256
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory
+
+
+def salvar_primeiro_frame(video: str, sha256: str) -> str:
+    ffmpeg, _ = _media_tools()
+    output = asset_directory(sha256) / 'primeiro_frame.jpg'
+    _media_command([ffmpeg, '-v', 'error', '-nostdin', '-y', '-i', video, '-frames:v', '1',
+                    '-vf', 'scale=1280:1280:force_original_aspect_ratio=decrease,unsharp=5:5:0.6,eq=contrast=1.04:brightness=0.02', str(output)], 120)
+    return str(output)
+
+
+def gerar_capa(title: str, first_frame: str, output: str) -> str:
+    """Capa 1280x720, título inteiro em até quatro linhas; sem alterar o frame original."""
+    from PIL import Image, ImageDraw, ImageFont, ImageOps
+    with Image.open(first_frame) as source:
+        base = ImageOps.fit(source.convert('RGB'), (1280, 720))
+    base = Image.blend(base, Image.new('RGB', base.size, '#080b12'), 0.78)
+    draw = ImageDraw.Draw(base)
+    font_paths = [os.path.join(os.environ.get('WINDIR', 'C:/Windows'), 'Fonts', 'arialbd.ttf'),
+                  '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf', 'DejaVuSans-Bold.ttf']
+    lines = []
+    for size in range(88, 27, -2):
+        font = None
+        for path in font_paths:
+            try:
+                font = ImageFont.truetype(path, size)
+                break
+            except OSError:
+                pass
+        if font is None:
+            font = ImageFont.load_default(size=size)
+        lines, line = [], ''
+        # Character wrapping also handles long tokens without clipping.
+        for word in title.split():
+            trial = (line + ' ' + word).strip()
+            if draw.textlength(trial, font=font) <= 1120:
+                line = trial
+                continue
+            if line:
+                lines.append(line)
+            line = ''
+            for char in word:
+                if draw.textlength(line + char, font=font) > 1120:
+                    lines.append(line)
+                    line = ''
+                line += char
+        if line:
+            lines.append(line)
+        if len(lines) <= 4 and len(lines) * (size + 20) <= 540:
+            break
+    y = 65
+    for line in lines:
+        draw.text((80, y), line, font=font, fill='white', stroke_width=2, stroke_fill='#000000')
+        y += size + 20
+    Path(output).parent.mkdir(parents=True, exist_ok=True)
+    base.save(output, 'JPEG', quality=90, optimize=True)
+    return output
+
+
+def preparar_primeiro_frame_tiktok(video: str, directory: str) -> str:
+    """Inbox não aceita capa. Melhora o primeiro frame da cópia enviada, sem prometer a seleção no app."""
+    ffmpeg, _ = _media_tools()
+    output = os.path.join(directory, 'tiktok_primeiro_frame.mp4')
+    _media_command([ffmpeg, '-v', 'error', '-nostdin', '-y', '-i', video, '-map', '0:v:0', '-map', '0:a:0?',
+                    '-vf', "scale=trunc(iw/2)*2:trunc(ih/2)*2,unsharp=5:5:0.6:enable='eq(n,0)',eq=contrast=1.04:brightness=0.02:enable='eq(n,0)'",
+                    '-c:v', 'libx264', '-preset', 'medium', '-crf', '18', '-pix_fmt', 'yuv420p',
+                    '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart', output], 3600)
+    return output
+
+
+def enviar_capa_youtube(video_id: str, thumbnail: str, token: str) -> str:
+    """A publicação já foi confirmada; falha da capa nunca dispara reenvio do vídeo."""
+    from urllib.parse import urlencode
+    headers = {'Authorization': f'Bearer {token}'}
+    query = urlencode({'id': video_id, 'part': 'processingDetails'})
+    for _ in range(24):
+        try:
+            with urlopen(Request('https://www.googleapis.com/youtube/v3/videos?' + query, headers=headers), timeout=30) as response:
+                items = json.load(response).get('items', [])
+            status = items[0].get('processingDetails', {}).get('processingStatus') if items else None
+            if status == 'succeeded':
+                break
+            if status in {'failed', 'terminated'}:
+                raise RuntimeError('Processamento do vídeo falhou; capa não aplicada.')
+        except HTTPError as exc:
+            raise RuntimeError(f'Não foi possível confirmar processamento/permissão de thumbnail (HTTP {exc.code}).') from exc
+        time.sleep(5)
+    else:
+        raise RuntimeError('Vídeo publicado; processamento ainda pendente. Capa gerada e preservada para nova tentativa.')
+    endpoint = 'https://www.googleapis.com/upload/youtube/v3/thumbnails/set?' + urlencode({'videoId': video_id, 'uploadType': 'media'})
+    data = Path(thumbnail).read_bytes()
+    with urlopen(Request(endpoint, data=data, headers={**headers, 'Content-Type': 'image/jpeg'}), timeout=60) as response:
+        result = json.load(response)
+    if not result.get('items'):
+        raise RuntimeError('YouTube não confirmou a thumbnail.')
+    return 'Capa aplicada no YouTube.'
 
 
 def melhorar_video(video: str | os.PathLike, *, analise: dict | None = None,
@@ -321,6 +620,40 @@ def melhorar_video(video: str | os.PathLike, *, analise: dict | None = None,
     return output
 
 
+def preparar_midia_selecionada(report: dict, download) -> None:
+    """Prepara uma vez por seleção; ambos os destinos reutilizam a cópia verificada."""
+    directory = asset_directory(report['sha256'])
+    with tempfile.TemporaryDirectory(prefix='painel-selected-') as temporary:
+        original = os.path.join(temporary, 'original.mp4')
+        download(report['id'], original)
+        if hash_video(original) != report['sha256']:
+            raise RuntimeError('O vídeo mudou durante a seleção; será necessário analisar novamente.')
+        if report['quality']['qualidade'] == 'RUIM':
+            output = melhorar_video(original, analise=report['quality'], output_dir=str(directory))
+            report['improved'] = True
+        else:
+            output = str(directory / 'video_original.mp4')
+            shutil.copy2(original, output)
+            report['improved'] = False
+        report['prepared_path'] = output
+        report['prepared_sha256'] = hash_video(output)
+        report['first_frame'] = salvar_primeiro_frame(output, report['sha256'])
+
+
+def prepared_media(report: dict | None) -> str | None:
+    if not report or not report.get('prepared_path'):
+        return None
+    path = Path(report['prepared_path']).resolve()
+    root = Path(__file__).with_name('autopost_assets').resolve()
+    if not path.is_relative_to(root):
+        raise RuntimeError('Caminho da mídia preparada inválido.')
+    if not path.is_file():
+        return None
+    if hash_video(str(path)) != report.get('prepared_sha256'):
+        raise RuntimeError('A mídia preparada foi alterada; envio interrompido.')
+    return str(path)
+
+
 def preparar_melhores_do_dia(store, schedule: dict, run_date: str, videos: list[dict],
                             download, blocked_ids: set[str]) -> list[dict]:
     day, selected = store.get_day(schedule['id'], run_date)
@@ -331,14 +664,23 @@ def preparar_melhores_do_dia(store, schedule: dict, run_date: str, videos: list[
         raise RuntimeError("A análise completa do dia ainda está em andamento; nenhum vídeo será escolhido por ordem de chegada.")
     used_ids, previous = store.used_content()
     blocked_ids = set(blocked_ids) | used_ids
+    try:
+        blocked_ids.update(r.get('video_id') for r in ler_historico() if r.get('status') in {'posted', 'inbox'})
+    except (OSError, ValueError):
+        pass  # O SQLite mantém o bloqueio de repetição mesmo sem o espelho JSON.
     analyzed = []
     failed = False
     try:
         validar_analise_conteudo()
         trends = carregar_tendencias()
-        for video in videos:
+        for index, video in enumerate(videos, 1):
             report = {"id": video['id'], "name": video.get('name', ''), "folderName": video.get('folderName', ''),
-                      "score": 0, "reasons": [], "message": "Baixando e analisando conteúdo", "status": "analyzing"}
+                      "score": 0, "score_scale": 10, "reasons": [], "steps": [],
+                      "message": f"Analisando vídeo {index}/{len(videos)}", "status": "analyzing"}
+            def step(message):
+                report['message'] = message
+                report['steps'].append(message)
+                store.save_candidate(schedule['id'], run_date, lease, report)
             if video['id'] in blocked_ids:
                 report.update(status='excluded', message='Vídeo repetido: já reservado, enviado ou marcado como postado', reasons=['repetido'])
                 store.save_candidate(schedule['id'], run_date, lease, report)
@@ -348,15 +690,22 @@ def preparar_melhores_do_dia(store, schedule: dict, run_date: str, videos: list[
                 with tempfile.TemporaryDirectory(prefix='painel-content-') as directory:
                     source = os.path.join(directory, 'source.mp4')
                     download(video['id'], source)
+                    step(f'Vídeo {index}: download concluído; verificando qualidade')
                     report['sha256'] = hash_video(source)
                     report['quality'] = analisar_qualidade(source)
+                    report['score'], report['reasons'] = pontuar_video(report['quality'])
+                    step(f"Vídeo {index}: {'BOM' if report['quality']['qualidade'] == 'BOA' else 'RUIM'}; extraindo 3 frames")
                     frames, report['visual_hashes'] = extrair_frames(source, report['quality']['duration'], directory)
+                    report['first_frame'] = salvar_primeiro_frame(source, report['sha256'])
+                    step(f'Vídeo {index}: 3 frames extraídos; transcrevendo áudio com Whisper')
                     report['transcription'] = transcrever_whisper(source, directory, report['quality']['has_audio'])
+                    step(f'Vídeo {index}: transcrição concluída; gerando história e título')
                     if any(conteudo_repetido(report, prior) for prior in previous):
                         report.update(status='excluded', message='Conteúdo repetido de um envio anterior', reasons=['duplicata por hash/assinatura visual'])
                     else:
                         report['content'] = gerar_textos_conteudo(frames, report['transcription'], trends)
-                        report['score'], report['reasons'] = pontuar_video(report['quality'])
+                        step('Título gerado: ' + report['content']['title'])
+                        step('Hashtags: ' + (' '.join(report['content']['hashtags']) or 'nenhuma pertinente e atual'))
                         report.update(status='analyzed', message='Conteúdo analisado; aguardando comparação com todos os candidatos')
                         analyzed.append(report)
             except Exception as exc:
@@ -369,10 +718,27 @@ def preparar_melhores_do_dia(store, schedule: dict, run_date: str, videos: list[
                 report.update(status='excluded', message='Duplicata de candidato com nota igual ou maior', reasons=['repetido no lote'])
             else:
                 unique.append(report)
-                report['reasons'].append('não repetido no histórico nem entre candidatos')
+                report['score'] = min(10, report['score'] + 1)
+                report['reasons'].append('+1: não repetido no histórico nem entre candidatos')
                 if len(selected) < min(4, schedule['videos_per_day']):
+                    report['message'] = 'Escolhido pelo ranking; preparando vídeo antes de agendar'
+                    store.save_candidate(schedule['id'], run_date, lease, report)
+                    try:
+                        preparar_midia_selecionada(report, download)
+                        report['steps'].append('Melhoria aplicada: video_melhorado.mp4' if report['improved'] else 'Vídeo BOM: original preservado sem alteração.')
+                    except Exception as exc:
+                        failed = True
+                        report.update(status='error', message='Falha ao preparar mídia: ' + str(exc))
+                        store.save_candidate(schedule['id'], run_date, lease, report)
+                        continue
                     selected.append(report)
                     report['message'] = 'Escolhido entre os melhores: ' + '; '.join(report['reasons'])
+                    try:
+                        report['thumbnail'] = gerar_capa(report['content']['title'], report['first_frame'],
+                                                         str(asset_directory(report['sha256']) / 'capa.jpg'))
+                        report['steps'].append('Capa automática criada com título legível.')
+                    except (ImportError, OSError, ValueError) as exc:
+                        report['asset_warning'] = 'Capa indisponível: ' + str(exc)
                 else:
                     report['message'] = 'Não selecionado: quatro candidatos obtiveram prioridade maior'
             store.save_candidate(schedule['id'], run_date, lease, report)
