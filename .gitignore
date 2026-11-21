@@ -1,0 +1,4 @@
+.env
+social_tokens.enc
+agendamentos.sqlite3
+__pycache__/

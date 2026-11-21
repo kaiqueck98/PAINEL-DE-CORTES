@@ -1,0 +1,600 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="csrf-token" content="{{ csrf_token }}">
+  <title>Painel de Cortes Prontos</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #101114;
+      color: #f5f5f5;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; background: radial-gradient(ellipse at top, #202128 0, #101114 58%); }
+    main { width: min(920px, calc(100% - 32px)); margin: 0 auto; padding: 72px 0; }
+    .eyebrow { color: #a78bfa; font-size: .75rem; font-weight: 700; letter-spacing: .16em; text-transform: uppercase; }
+    h1 { margin: 12px 0; font-size: clamp(2rem, 6vw, 3.4rem); letter-spacing: -.05em; }
+    .intro { color: #a1a1aa; line-height: 1.6; max-width: 580px; }
+    form, .content-panel { margin-top: 32px; padding: 24px; border: 1px solid #30313a; border-radius: 18px; background: #191a20; }
+    .social-connections { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 22px; }
+    .connection-link { display: inline-flex; align-items: center; justify-content: center; padding: 10px 14px; border: 1px solid #514276; border-radius: 10px; background: #29213b; color: #ddd6fe; font-size: .85rem; font-weight: 700; text-decoration: none; }
+    .connection-link:hover { background: #3b2d58; }
+    .connection-link.connected { border-color: #347653; background: #1d3b2a; color: #a7f3c1; }
+    .connection-link.disconnected { border-color: #3c3d48; background: #24252d; color: #d4d4d8; }
+    .success-message { background: #1d3b2a; color: #a7f3c1; }
+    .social-publishing-options { margin-top: 12px; padding: 14px; border: 1px solid #30313a; border-radius: 12px; background: #191a20; }
+    .social-publishing-options p { margin: 4px 0 10px; color: #a1a1aa; font-size: .82rem; }
+    label { display: block; margin-bottom: 10px; font-size: .9rem; font-weight: 600; }
+    .input-row { display: flex; gap: 10px; }
+    input { min-width: 0; flex: 1; padding: 14px 16px; border: 1px solid #3c3d48; border-radius: 10px; background: #111217; color: #fff; font: inherit; }
+    input:focus { outline: 2px solid #8b5cf6; outline-offset: 2px; }
+    button, .open-link { display: inline-flex; align-items: center; justify-content: center; padding: 13px 18px; border: 0; border-radius: 10px; background: #7c3aed; color: #fff; font: inherit; font-weight: 700; text-decoration: none; cursor: pointer; }
+    button:hover, .open-link:hover { background: #6d28d9; }
+    .hint { margin: 12px 0 0; color: #92939d; font-size: .82rem; }
+    .message { margin-top: 20px; padding: 14px 16px; border-radius: 10px; background: #33251b; color: #fdba74; line-height: 1.5; }
+    .folder-name { display: block; overflow-wrap: anywhere; margin: -4px 0 12px; color: #a78bfa; font-size: .8rem; }
+    .section-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+    h2 { margin: 0; font-size: 1.15rem; }
+    .count { color: #a1a1aa; font-size: .85rem; }
+    .back-link { display: inline-flex; margin-top: 18px; color: #c4b5fd; font-size: .9rem; font-weight: 600; text-decoration: none; }
+    .folder-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 14px; margin-top: 20px; }
+    .folder-card { display: flex; min-height: 120px; flex-direction: column; justify-content: space-between; padding: 18px; border: 1px solid #383944; border-radius: 12px; background: #111217; color: #f5f5f5; text-decoration: none; transition: border-color .15s, transform .15s; }
+    .folder-card:hover { transform: translateY(-2px); border-color: #8b5cf6; }
+    .folder-icon { color: #a78bfa; font-size: 1.4rem; }
+    .folder-title { overflow-wrap: anywhere; margin: 12px 0; font-size: .95rem; }
+    .folder-count { color: #a1a1aa; font-size: .82rem; }
+    .subheading { margin: 26px 0 0; color: #d4d4d8; font-size: .9rem; }
+    .video-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 16px; margin-top: 20px; }
+    .video { overflow: hidden; border: 1px solid #30313a; border-radius: 12px; background: #111217; }
+    .video.posted { border-color: #347653; background: #12231a; }
+    .thumbnail { display: block; width: 100%; aspect-ratio: 16 / 9; object-fit: cover; background: #24252d; }
+    .placeholder { display: grid; place-items: center; color: #a78bfa; font-size: 2rem; }
+    .video-info { padding: 14px; }
+    .video-name { overflow-wrap: anywhere; margin: 0 0 14px; font-size: .95rem; line-height: 1.4; }
+    .video-meta { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+    .duration { color: #a1a1aa; font-size: .8rem; }
+    .open-link, .download-link { padding: 8px 12px; font-size: .82rem; }
+    .download-link { display: inline-flex; align-items: center; justify-content: center; border: 1px solid #383944; border-radius: 10px; background: #24252d; color: #f5f5f5; font-weight: 700; text-decoration: none; }
+    .download-link:hover { background: #30313a; }
+    .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+    .video-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin-top: 20px; }
+    .video-controls form { display: flex; align-items: center; gap: 8px; margin: 0; padding: 0; border: 0; background: none; }
+    .video-controls select { padding: 9px 10px; border: 1px solid #3c3d48; border-radius: 9px; background: #111217; color: #fff; font: inherit; }
+    .control-link, .control-button, .mark-button, .copy-button { display: inline-flex; align-items: center; justify-content: center; padding: 9px 12px; border: 1px solid #514276; border-radius: 9px; background: #29213b; color: #ddd6fe; font: inherit; font-size: .82rem; font-weight: 650; text-decoration: none; cursor: pointer; }
+    .control-link:hover, .control-button:hover, .mark-button:hover:not(:disabled), .copy-button:hover { background: #3b2d58; }
+    .posted-filters { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 20px; }
+    .posted-filters .active { border-color: #8b5cf6; background: #3b2d58; }
+    .video.posted .score { background: #1d3b2a; color: #a7f3c1; }
+    .video.posted .mark-button { border-color: #347653; background: #1d3b2a; color: #a7f3c1; }
+    .quality-info { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 0 0 12px; }
+    .resolution { color: #a1a1aa; font-size: .8rem; }
+    .quality-badge { padding: 5px 8px; border-radius: 7px; font-size: .75rem; font-weight: 700; }
+    .quality-good { background: #1d3b2a; color: #a7f3c1; }
+    .quality-low { background: #482126; color: #fda4af; }
+    .quality-unknown { background: #30313a; color: #d4d4d8; }
+    .improve-button { display: inline-flex; align-items: center; justify-content: center; padding: 8px 12px; border: 0; border-radius: 10px; background: #7c3aed; color: white; font: inherit; font-size: .82rem; font-weight: 700; cursor: pointer; }
+    .improve-button:disabled { opacity: .65; cursor: wait; }
+    .improvement-status { flex-basis: 100%; margin-top: 8px; }
+    .improvement-status progress { width: min(100%, 360px); height: 12px; accent-color: #8b5cf6; }
+    .improvement-message { margin: 5px 0; color: #c4b5fd; font-size: .8rem; }
+    .enhancement-preview { flex-basis: 100%; margin-top: 12px; padding: 12px; border: 1px solid #383944; border-radius: 10px; background: #191a20; }
+    .preview-controls { display: flex; gap: 8px; margin-bottom: 10px; }
+    .preview-controls .active { border-color: #8b5cf6; background: #3b2d58; }
+    .enhanced-player { display: block; width: 100%; max-height: 520px; background: #050506; }
+    .watch-message { margin: 8px 0; color: #a1a1aa; font-size: .8rem; }
+    .enhanced-download { margin-top: 8px; }
+    .score { display: inline-block; margin-bottom: 12px; padding: 5px 8px; border-radius: 7px; background: #28213a; color: #ddd6fe; font-size: .8rem; font-weight: 700; }
+    .video-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+    .video-actions form { margin: 0; padding: 0; border: 0; background: none; }
+    .social-post-button { display: inline-flex; align-items: center; justify-content: center; padding: 8px 12px; border: 1px solid #3b6b85; border-radius: 10px; background: #172f3b; color: #bae6fd; font: inherit; font-size: .82rem; font-weight: 700; cursor: pointer; }
+    .social-post-button:hover:not(:disabled) { background: #214456; }
+    .social-post-button:disabled { opacity: .7; cursor: default; }
+    .social-post-status { flex-basis: 100%; min-height: 1.2em; margin: 0; color: #a1a1aa; font-size: .78rem; }
+    .mark-button:disabled { border-color: #3c3d48; background: #25262d; color: #a1a1aa; cursor: default; }
+    .suggestions { margin-top: 14px; padding: 12px; border: 1px solid #30313a; border-radius: 9px; background: #191a20; }
+    .suggestions h4 { margin: 0 0 5px; color: #a1a1aa; font-size: .75rem; font-weight: 600; }
+    .suggestion-field { width: 100%; margin: 0 0 12px; padding: 8px 10px; border: 1px solid #383944; border-radius: 7px; background: #111217; color: #f5f5f5; font: inherit; font-size: .85rem; }
+    .copy-status { display: block; min-height: 1.2em; margin-top: 6px; color: #a1a1aa; font-size: .75rem; }
+    .model-form { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; align-items: end; gap: 12px; }
+    .model-form label { margin: 0; color: #d4d4d8; font-size: .82rem; }
+    .model-form input { width: 100%; margin-top: 7px; }
+    .legal-links { display: flex; justify-content: center; flex-wrap: wrap; gap: 18px; padding: 0 16px 28px; font-size: .8rem; }
+    .legal-links a { color: #a1a1aa; text-decoration: none; }
+    .legal-links a:hover { color: #c4b5fd; }
+    @media (max-width: 560px) {
+      main { padding: 44px 0; }
+      .input-row { flex-direction: column; }
+      button { width: 100%; }
+      form, .content-panel { padding: 18px; }
+      .model-form { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <span class="eyebrow">Organize seus vídeos</span>
+    <h1>Painel de Cortes Prontos</h1>
+    <p class="intro">Cole o link de uma pasta do Google Drive para navegar pelas pastas e encontrar seus vídeos.</p>
+
+    <nav class="social-connections" aria-label="Conectar redes sociais">
+      <a class="connection-link {% if tiktok_connected %}connected{% else %}disconnected{% endif %}" href="{{ url_for('start_social_oauth', platform='tiktok') }}">
+        {% if tiktok_connected %}TikTok conectado ✅{% else %}TikTok desconectado · Conectar{% endif %}
+      </a>
+      <a class="connection-link {% if youtube_connected %}connected{% else %}disconnected{% endif %}" href="{{ url_for('start_social_oauth', platform='youtube') }}">
+        {% if youtube_connected %}YouTube conectado ✅{% else %}YouTube desconectado · Conectar{% endif %}
+      </a>
+    </nav>
+    {% if social_token_error %}
+      <div class="message" role="status">{{ social_token_error }}</div>
+    {% endif %}
+    {% for category, message in get_flashed_messages(with_categories=true) %}
+      <div class="message {% if category == 'success' %}success-message{% endif %}" role="status">{{ message }}</div>
+    {% endfor %}
+    {% if tiktok_connected %}
+      <section class="social-publishing-options" aria-label="Envio de rascunhos ao TikTok">
+        <p>O vídeo será enviado como rascunho para a caixa de entrada do TikTok. Abra a notificação no TikTok para adicionar texto, editar e publicar.</p>
+      </section>
+    {% endif %}
+
+    <form method="post">
+      <label for="folder_link">Link da pasta do Google Drive</label>
+      <div class="input-row">
+        <input id="folder_link" name="folder_link" type="url" placeholder="https://drive.google.com/drive/folders/..." value="{{ folder_link }}" required>
+        <button type="submit">Listar pastas</button>
+      </div>
+      <p class="hint">A pasta precisa estar acessível pela chave da API configurada no servidor.</p>
+    </form>
+
+    {% if error %}
+      <div class="message" role="status">{{ error }}</div>
+    {% endif %}
+
+    {% if view %}
+      <section class="content-panel" aria-labelledby="content-heading">
+        <div class="section-heading">
+          <h2 id="content-heading">{{ view.folder_name }}</h2>
+          <span class="count">{{ view.video_count }} vídeo(s) no total</span>
+        </div>
+
+        {% if not is_root_view %}
+          <a class="back-link" href="{{ url_for('index', path=parent_path_string) }}">← Voltar para as pastas</a>
+          <nav class="posted-filters" aria-label="Filtrar por status de postagem">
+            <a class="control-link {% if posted_filter == 'all' %}active{% endif %}" href="{{ url_for('index', path=path_string, sort_order=sort_order, good_filter=good_filter, posted_filter='all') }}">Todos</a>
+            <a class="control-link {% if posted_filter == 'pending' %}active{% endif %}" href="{{ url_for('index', path=path_string, sort_order=sort_order, good_filter=good_filter, posted_filter='pending') }}">Para postar</a>
+            <a class="control-link {% if posted_filter == 'posted' %}active{% endif %}" href="{{ url_for('index', path=path_string, sort_order=sort_order, good_filter=good_filter, posted_filter='posted') }}">Já postados</a>
+          </nav>
+          <form class="model-form" method="post">
+            <input type="hidden" name="action" value="save_model">
+            <input type="hidden" name="path" value="{{ path_string }}">
+            <input type="hidden" name="sort_order" value="{{ sort_order }}">
+            <input type="hidden" name="good_filter" value="{{ good_filter }}">
+            <input type="hidden" name="posted_filter" value="{{ posted_filter }}">
+            <label for="title_template">
+              Modelo de título
+              <input id="title_template" name="title_template" type="text" value="{{ folder_model.title_template or '' }}" placeholder="Parte {numero} | Melhor momento 😂">
+            </label>
+            <label for="hashtags_template">
+              Modelo de hashtags
+              <input id="hashtags_template" name="hashtags_template" type="text" value="{{ folder_model.hashtags_template or '' }}" placeholder="#memes #viral #engraçado">
+            </label>
+            <button type="submit">Salvar modelo</button>
+          </form>
+          <div class="video-controls">
+            <a class="control-link" href="{{ url_for('index', path=path_string, sort_order='score', good_filter=good_filter, posted_filter=posted_filter) }}">Melhores primeiro</a>
+            {% if sort_order == 'score' %}
+              <a class="control-link" href="{{ url_for('index', path=path_string, good_filter=good_filter, posted_filter=posted_filter) }}">Ordem original</a>
+            {% endif %}
+            <form method="get">
+              <input type="hidden" name="path" value="{{ path_string }}">
+              <input type="hidden" name="sort_order" value="{{ sort_order }}">
+              <input type="hidden" name="posted_filter" value="{{ posted_filter }}">
+              <input type="hidden" name="good_filter" value="{% if good_filter == 'good' %}all{% else %}good{% endif %}">
+              <button class="control-button" type="submit">{% if good_filter == 'good' %}Ver todos{% else %}Ver só os bons{% endif %}</button>
+            </form>
+            <form method="get">
+              <input type="hidden" name="path" value="{{ path_string }}">
+              <input type="hidden" name="sort_order" value="{{ sort_order }}">
+              <input type="hidden" name="posted_filter" value="{{ posted_filter }}">
+              <label class="sr-only" for="good_filter">Filtrar vídeos</label>
+              <select id="good_filter" name="good_filter">
+                <option value="all" {% if good_filter == 'all' %}selected{% endif %}>Todos</option>
+                <option value="good" {% if good_filter == 'good' %}selected{% endif %}>Só os marcados como bons</option>
+              </select>
+              <button type="submit">Filtrar</button>
+            </form>
+          </div>
+        {% endif %}
+
+        {% for warning in view.warnings %}
+          <div class="message" role="status">{{ warning }}</div>
+        {% endfor %}
+
+        {% if view.folders %}
+          <h3 class="subheading">Subpastas</h3>
+          <div class="folder-grid">
+            {% for folder in view.folders %}
+              <a class="folder-card" href="{{ url_for('index', path=path_string ~ ',' ~ folder.id) }}">
+                <span class="folder-icon" aria-hidden="true">▰</span>
+                <h3 class="folder-title">{{ folder.name }}</h3>
+                <span class="folder-count">{{ folder.video_count }} vídeo(s)</span>
+              </a>
+            {% endfor %}
+          </div>
+        {% elif is_root_view %}
+          <p class="hint">Essa pasta não contém subpastas.</p>
+        {% endif %}
+
+        {% if not is_root_view %}
+          {% if view.videos %}
+            <h3 class="subheading">Vídeos desta pasta</h3>
+            <div class="video-grid">
+              {% for video in view.videos %}
+                <article class="video {% if video.posted %}posted{% endif %}">
+                  {% if video.thumbnailLink %}
+                    <img class="thumbnail" src="{{ video.thumbnailLink }}" alt="" loading="lazy">
+                  {% else %}
+                    <div class="thumbnail placeholder" aria-hidden="true">▶</div>
+                  {% endif %}
+                  <div class="video-info">
+                    <h3 class="video-name">{{ video.name }}</h3>
+                    <div class="quality-info">
+                      <span class="resolution">Resolução: {{ video.resolution }}</span>
+                      {% if video.quality_low %}
+                        <span class="quality-badge quality-low">Qualidade baixa</span>
+                      {% elif video.resolution != 'Indisponível' %}
+                        <span class="quality-badge quality-good">Qualidade boa</span>
+                      {% else %}
+                        <span class="quality-badge quality-unknown">Qualidade indisponível</span>
+                      {% endif %}
+                    </div>
+                    <span class="score">Nota automática: {{ "%.1f"|format(video.score) }}/10</span>
+                    <div class="suggestions">
+                      <h4>Título sugerido para TikTok/Reels</h4>
+                      <input class="suggestion-field" type="text" data-suggested-title value="{{ video.suggested_title }}" aria-label="Título sugerido para TikTok/Reels">
+                      <h4>Hashtags sugeridas</h4>
+                      <input class="suggestion-field" type="text" data-suggested-hashtags value="{{ video.suggested_hashtags }}" aria-label="Hashtags sugeridas">
+                      <button class="copy-button" type="button" data-copy-title="{{ video.suggested_title }}" data-copy-hashtags="{{ video.suggested_hashtags }}">Copiar título + hashtags</button>
+                      <span class="copy-status" aria-live="polite"></span>
+                    </div>
+                    <div class="video-meta">
+                      <span class="duration">{{ video.videoMediaMetadata|duration }}</span>
+                    </div>
+                    <div class="video-actions">
+                      <a class="open-link" href="{{ video.webViewLink or ('https://drive.google.com/file/d/' ~ video.id ~ '/view') }}" target="_blank" rel="noopener noreferrer">Abrir vídeo</a>
+                      <a class="download-link" href="{{ url_for('download_video', video_id=video.id, filename=video.name) }}">Baixar vídeo</a>
+                      {% if video.quality_low %}
+                        <button class="improve-button" type="button" data-improve-video data-video-id="{{ video.id }}" data-filename="{{ video.name }}" data-duration-ms="{{ video.duration_ms }}">Melhorar qualidade</button>
+                        <div class="improvement-status" hidden>
+                          <progress max="100" value="0" aria-label="Progresso da melhoria de qualidade"></progress>
+                          <p class="improvement-message" aria-live="polite"></p>
+                        </div>
+                        <div class="enhancement-preview" hidden>
+                          <div class="preview-controls">
+                            <button class="control-button" type="button" data-preview-source="original">Ver original</button>
+                            <button class="control-button active" type="button" data-preview-source="improved">Ver melhorado</button>
+                          </div>
+                          <video class="enhanced-player" controls playsinline preload="metadata"
+                            data-compare-player
+                            data-original-src="{{ url_for('stream_original_video', video_id=video.id, filename=video.name) }}"></video>
+                          <p class="watch-message">Assista ao vídeo melhorado até o fim para liberar o download.</p>
+                          <a class="download-link enhanced-download" hidden>Baixar vídeo melhorado</a>
+                        </div>
+                      {% endif %}
+                      <form method="post">
+                        <input type="hidden" name="action" value="mark_good">
+                        <input type="hidden" name="path" value="{{ path_string }}">
+                        <input type="hidden" name="sort_order" value="{{ sort_order }}">
+                        <input type="hidden" name="good_filter" value="{{ good_filter }}">
+                        <input type="hidden" name="posted_filter" value="{{ posted_filter }}">
+                        <input type="hidden" name="video_id" value="{{ video.id }}">
+                        <button class="mark-button" type="submit" {% if video.marked_good %}disabled{% endif %}>
+                          {% if video.marked_good %}Marcado como bom{% else %}Marcar como bom{% endif %}
+                        </button>
+                      </form>
+                      <form method="post">
+                        <input type="hidden" name="action" value="mark_posted">
+                        <input type="hidden" name="path" value="{{ path_string }}">
+                        <input type="hidden" name="sort_order" value="{{ sort_order }}">
+                        <input type="hidden" name="good_filter" value="{{ good_filter }}">
+                        <input type="hidden" name="posted_filter" value="{{ posted_filter }}">
+                        <input type="hidden" name="video_id" value="{{ video.id }}">
+                        <button class="mark-button" type="submit" {% if video.posted %}disabled{% endif %}>
+                          {% if video.posted %}Já postado{% else %}Marcar como postado{% endif %}
+                        </button>
+                      </form>
+                      <button class="social-post-button" type="button" data-social-post
+                        data-platform="tiktok" data-video-id="{{ video.id }}" data-filename="{{ video.name }}"
+                        {% if video.social_posted.tiktok or video.social_inbox or video.social_processing.tiktok %}disabled{% endif %}>
+                        {% if video.social_posted.tiktok %}Postado no TikTok
+                        {% elif video.social_inbox %}Enviado à caixa de entrada do TikTok
+                        {% elif video.social_processing.tiktok %}Enviando rascunho...
+                        {% else %}Enviar rascunho ao TikTok{% endif %}
+                      </button>
+                      <button class="social-post-button" type="button" data-social-post
+                        data-platform="youtube" data-video-id="{{ video.id }}" data-filename="{{ video.name }}"
+                        {% if video.social_posted.youtube or video.social_processing.youtube %}disabled{% endif %}>
+                        {% if video.social_posted.youtube %}Postado no YouTube
+                        {% elif video.social_processing.youtube %}Publicando no YouTube...
+                        {% else %}Postar no YouTube Shorts{% endif %}
+                      </button>
+                      <p class="social-post-status" data-social-post-status="tiktok" aria-live="polite">
+                        {% if video.social_posted.tiktok %}Postado no TikTok{% endif %}
+                        {% if video.social_inbox %}Rascunho enviado. Abra a notificação no TikTok para editar e publicar.{% endif %}
+                        {% if video.social_processing.tiktok %}TikTok ainda está preparando o rascunho; confira a caixa de entrada antes de tentar novamente.{% endif %}
+                      </p>
+                      <p class="social-post-status" data-social-post-status="youtube" aria-live="polite">
+                        {% if video.social_posted.youtube %}Postado no YouTube{% endif %}
+                        {% if video.social_processing.youtube %}YouTube ainda está processando; confira a conta antes de tentar novamente.{% endif %}
+                      </p>
+                    </div>
+                  </div>
+                </article>
+              {% endfor %}
+            </div>
+          {% else %}
+            {% if good_filter == 'good' %}
+              <p class="hint">Nenhum vídeo desta pasta está marcado como bom.</p>
+            {% else %}
+              <p class="hint">Não há vídeos diretamente nesta pasta.</p>
+            {% endif %}
+          {% endif %}
+        {% endif %}
+      </section>
+    {% endif %}
+  </main>
+  <footer class="legal-links" aria-label="Informações legais">
+    <a href="{{ url_for('privacy') }}">Política de Privacidade</a>
+    <a href="{{ url_for('terms') }}">Termos de Uso</a>
+  </footer>
+  <script>
+    document.addEventListener("click", async (event) => {
+      const socialButton = event.target.closest("[data-social-post]");
+      if (socialButton) {
+        await postSocialVideo(socialButton);
+        return;
+      }
+
+      const improveButton = event.target.closest("[data-improve-video]");
+      if (improveButton) {
+        await improveVideo(improveButton);
+        return;
+      }
+
+      const sourceButton = event.target.closest("[data-preview-source]");
+      if (sourceButton) {
+        switchVideoSource(sourceButton);
+        return;
+      }
+
+      const button = event.target.closest("[data-copy-title]");
+      if (!button) return;
+
+      const card = button.closest(".video");
+      const title = card.querySelector("[data-suggested-title]").value;
+      const hashtags = card.querySelector("[data-suggested-hashtags]").value;
+      const text = `${title}\n${hashtags}`;
+      const status = button.nextElementSibling;
+      try {
+        if (navigator.clipboard && window.isSecureContext) {
+          await navigator.clipboard.writeText(text);
+        } else {
+          const field = document.createElement("textarea");
+          field.value = text;
+          field.style.position = "fixed";
+          field.style.opacity = "0";
+          document.body.appendChild(field);
+          field.select();
+          const copied = document.execCommand("copy");
+          field.remove();
+          if (!copied) throw new Error("Clipboard copy failed");
+        }
+        status.textContent = "Título e hashtags copiados.";
+      } catch {
+        status.textContent = "Não foi possível copiar. Selecione e copie manualmente.";
+      }
+    });
+
+    async function postSocialVideo(button) {
+      const card = button.closest(".video");
+      const platform = button.dataset.platform;
+      const status = card.querySelector(`[data-social-post-status="${platform}"]`);
+      const title = card.querySelector("[data-suggested-title]").value;
+      const hashtags = card.querySelector("[data-suggested-hashtags]").value;
+      const platformName = platform === "tiktok" ? "TikTok" : "YouTube";
+      button.disabled = true;
+      status.textContent = platform === "tiktok" ? "Preparando rascunho..." : "Preparando publicação...";
+
+      try {
+        const body = new URLSearchParams({ filename: button.dataset.filename });
+        if (platform === "youtube") {
+          body.set("title", title);
+          body.set("hashtags", hashtags);
+        }
+        const start = await fetch(`/social-post/${platform}/${encodeURIComponent(button.dataset.videoId)}`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/x-www-form-urlencoded",
+            "X-CSRF-Token": document.querySelector('meta[name="csrf-token"]').content
+          },
+          body
+        });
+        const job = await start.json();
+        if (!start.ok) {
+          const action = platform === "tiktok" ? "enviar o rascunho ao" : "iniciar a publicação no";
+          throw new Error(job.error || `Não foi possível ${action} ${platformName}.`);
+        }
+
+        while (true) {
+          await new Promise(resolve => setTimeout(resolve, 1200));
+          const response = await fetch(job.status_url);
+          const state = await response.json();
+          if (!response.ok) throw new Error(state.error || "Não foi possível consultar a publicação.");
+          status.textContent = state.message;
+          if (state.status === "complete") {
+            if (platform === "tiktok" && state.result_status === "inbox") {
+              button.textContent = "Enviado à caixa de entrada do TikTok";
+              return;
+            }
+            if (platform === "tiktok" && state.result_status !== "posted") {
+              throw new Error("O TikTok não confirmou o envio do rascunho.");
+            }
+            button.textContent = `Postado no ${platformName}`;
+            status.textContent = `Postado no ${platformName}`;
+            card.classList.add("posted");
+            const markPostedButton = card.querySelector('input[name="action"][value="mark_posted"]');
+            if (markPostedButton) {
+              const markButton = markPostedButton.form.querySelector("button");
+              markButton.disabled = true;
+              markButton.textContent = "Já postado";
+            }
+            return;
+          }
+          if (state.status === "partial") {
+            button.textContent = `Verificar ${platformName}`;
+            return;
+          }
+          if (state.status === "pending") {
+            button.textContent = `Verificar ${platformName}`;
+            return;
+          }
+          if (state.status === "error") throw new Error(state.message);
+        }
+      } catch (error) {
+        button.disabled = false;
+        const action = platform === "tiktok" ? "enviar rascunho ao" : "publicar no";
+        status.textContent = error.message || `Falha ao ${action} ${platformName}.`;
+      }
+    }
+
+    async function improveVideo(button) {
+      const container = button.nextElementSibling;
+      const progress = container.querySelector("progress");
+      const message = container.querySelector(".improvement-message");
+      const preview = container.nextElementSibling;
+      const player = preview.querySelector("[data-compare-player]");
+      const downloadLink = preview.querySelector(".enhanced-download");
+      container.hidden = false;
+      button.disabled = true;
+      button.textContent = "Preparando...";
+      progress.value = 0;
+      preview.hidden = true;
+      downloadLink.hidden = true;
+
+      try {
+        const body = new URLSearchParams({
+          filename: button.dataset.filename,
+          duration_ms: button.dataset.durationMs
+        });
+        const start = await fetch(`/improve/${encodeURIComponent(button.dataset.videoId)}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          body
+        });
+        const job = await start.json();
+        if (!start.ok) throw new Error(job.error || "Não foi possível iniciar a melhoria.");
+
+        button.textContent = "Melhorando...";
+        while (true) {
+          await new Promise(resolve => setTimeout(resolve, 900));
+          const response = await fetch(job.status_url);
+          const state = await response.json();
+          if (!response.ok) throw new Error(state.error || "Não foi possível consultar o progresso.");
+          if (state.status === "downloading" && state.progress === 0) {
+            progress.removeAttribute("value");
+          } else {
+            progress.value = state.progress;
+          }
+          message.textContent = state.message;
+          if (state.status === "complete") {
+              preview.hidden = false;
+              downloadLink.href = state.download_url;
+              player.dataset.improvedSrc = state.preview_url;
+              player.dataset.currentSource = "improved";
+              player.dataset.watchedThrough = player.dataset.watchedThrough || "0";
+              player.src = state.preview_url;
+              player.load();
+              const thumbnail = button.closest(".video").querySelector(".thumbnail");
+              if (thumbnail) thumbnail.hidden = true;
+              preview.querySelector('[data-preview-source="original"]').classList.remove("active");
+              preview.querySelector('[data-preview-source="improved"]').classList.add("active");
+              if (!player.dataset.watchListener) {
+                player.addEventListener("timeupdate", () => {
+                  if (player.dataset.currentSource !== "improved" || player.seeking) return;
+                  const currentTime = player.currentTime;
+                  const lastTime = Number(player.dataset.lastObservedTime || 0);
+                  const watchedThrough = Number(player.dataset.watchedThrough || 0);
+                  if (currentTime >= lastTime && currentTime - lastTime <= 1.5 &&
+                      lastTime <= watchedThrough + 0.75) {
+                    player.dataset.watchedThrough = String(Math.max(watchedThrough, currentTime));
+                  }
+                  player.dataset.lastObservedTime = String(currentTime);
+                });
+                player.addEventListener("seeking", () => {
+                  player.dataset.lastObservedTime = String(player.currentTime);
+                });
+                player.addEventListener("ended", () => {
+                  if (player.dataset.currentSource === "improved") {
+                    const watchedThrough = Number(player.dataset.watchedThrough || 0);
+                    const tolerance = Math.min(1, Math.max(0.1, player.duration * 0.02));
+                    if (watchedThrough >= player.duration - tolerance) {
+                      downloadLink.hidden = false;
+                      preview.querySelector(".watch-message").textContent =
+                        "Pré-visualização concluída. O vídeo melhorado está pronto para baixar.";
+                    } else {
+                      preview.querySelector(".watch-message").textContent =
+                        "Assista ao vídeo melhorado do início ao fim para liberar o download.";
+                    }
+                  }
+                });
+                player.addEventListener("error", () => {
+                  preview.querySelector(".watch-message").textContent =
+                    "Não foi possível carregar a pré-visualização deste vídeo.";
+                });
+                player.dataset.watchListener = "true";
+              }
+            button.textContent = "Melhoria concluída";
+            return;
+          }
+          if (state.status === "error") throw new Error(state.message);
+        }
+      } catch (error) {
+        message.textContent = error.message || "Falha ao melhorar o vídeo.";
+        button.disabled = false;
+        button.textContent = "Tentar novamente";
+      }
+    }
+
+    function switchVideoSource(button) {
+      const preview = button.closest(".enhancement-preview");
+      const player = preview.querySelector("[data-compare-player]");
+      const source = button.dataset.previewSource;
+      const nextUrl = source === "original" ? player.dataset.originalSrc : player.dataset.improvedSrc;
+      if (!nextUrl || player.dataset.currentSource === source) return;
+
+      const currentTime = player.currentTime;
+      const resumePlayback = !player.paused;
+      player.pause();
+      player.dataset.currentSource = source;
+      player.src = nextUrl;
+      player.load();
+      preview.querySelectorAll("[data-preview-source]").forEach((sourceButton) => {
+        sourceButton.classList.toggle("active", sourceButton === button);
+      });
+      player.addEventListener("loadedmetadata", () => {
+        if (Number.isFinite(player.duration) && currentTime < player.duration) {
+          player.currentTime = currentTime;
+        }
+        if (resumePlayback) {
+          player.play().catch(() => {
+          preview.querySelector(".watch-message").textContent =
+             "Clique em reproduzir para continuar a pré-visualização.";
+          });
+        }
+      }, { once: true });
+    }
+  </script>
+</body>
+</html>
