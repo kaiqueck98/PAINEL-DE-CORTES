@@ -11,7 +11,7 @@ import threading
 import time
 import unicodedata
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, quote, urlencode, urlparse
 from urllib.request import Request, urlopen
@@ -24,6 +24,10 @@ DOTENV_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
 load_dotenv(dotenv_path=DOTENV_FILE)
 
 from flask import Flask, Response, flash, jsonify, redirect, render_template, request, send_file, session, stream_with_context, url_for
+from sqlalchemy import Column, DateTime, Integer, String, Text, create_engine
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import declarative_base, sessionmaker
+from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.utils import secure_filename
 
 import social_publishing
@@ -31,7 +35,12 @@ import autopost
 social_publishing.ensure_token_encryption_key(DOTENV_FILE)
 
 app = Flask(__name__)
-app.config["SECRET_KEY"] = os.environ.get("FLASK_SECRET_KEY") or secrets.token_hex(32)
+app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)
+app.config["SECRET_KEY"] = (
+    os.environ.get("SECRET_KEY")
+    or os.environ.get("FLASK_SECRET_KEY")
+    or secrets.token_hex(32)
+)
 app.config["SESSION_COOKIE_HTTPONLY"] = True
 app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 app.config["SESSION_COOKIE_SECURE"] = os.environ.get("SESSION_COOKIE_SECURE", "").lower() in {
@@ -65,6 +74,155 @@ AUTPOST_STORE.initialize()
 AUTPOST_SCHEDULER = BackgroundScheduler(timezone=AUTPOST_TIMEZONE)
 AUTPOST_SCHEDULER_LOCK = threading.Lock()
 AUTPOST_SCHEDULER_STARTED = False
+
+DEFAULT_TOKENS_SQLITE_FILE = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "tokens.sqlite3"
+)
+
+
+def resolve_database_url():
+    database_url = os.environ.get("DATABASE_URL", "").strip()
+    if not database_url:
+        return f"sqlite:///{DEFAULT_TOKENS_SQLITE_FILE}"
+    if database_url.startswith("postgres://"):
+        return "postgresql://" + database_url[len("postgres://"):]
+    return database_url
+
+
+def create_token_engine(database_url=None):
+    url = database_url or resolve_database_url()
+    engine_kwargs = {"pool_pre_ping": True}
+    if url.startswith("sqlite:"):
+        engine_kwargs["connect_args"] = {"check_same_thread": False}
+    return create_engine(url, **engine_kwargs)
+
+
+TokenBase = declarative_base()
+
+
+class Token(TokenBase):
+    __tablename__ = "tokens"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    provider = Column(String(32), unique=True, nullable=False, index=True)
+    user_email = Column(String(255), nullable=True)
+    access_token = Column(Text, nullable=False)
+    refresh_token = Column(Text, nullable=False)
+    expires_at = Column(DateTime(timezone=True), nullable=True)
+    updated_at = Column(DateTime(timezone=True), nullable=False)
+
+
+TOKEN_ENGINE = create_token_engine()
+TokenSessionLocal = sessionmaker(
+    bind=TOKEN_ENGINE, autoflush=False, expire_on_commit=False
+)
+TokenBase.metadata.create_all(bind=TOKEN_ENGINE)
+
+
+def _datetime_to_timestamp(value):
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.timestamp()
+
+
+def _timestamp_to_datetime(value):
+    if value is None:
+        return None
+    return datetime.fromtimestamp(float(value), tz=timezone.utc)
+
+
+def load_tokens_from_db():
+    session_db = TokenSessionLocal()
+    try:
+        rows = session_db.query(Token).all()
+        tokens = {}
+        for row in rows:
+            if row.provider not in {"tiktok", "youtube"}:
+                continue
+            tokens[row.provider] = {
+                "access_token": social_publishing.decrypt_token_value(row.access_token),
+                "refresh_token": social_publishing.decrypt_token_value(row.refresh_token),
+                "expires_at": _datetime_to_timestamp(row.expires_at),
+                "user_email": row.user_email,
+            }
+        return tokens
+    except SQLAlchemyError as exc:
+        raise social_publishing.SocialPublishingError(
+            "Não foi possível consultar os tokens sociais no banco de dados."
+        ) from exc
+    finally:
+        session_db.close()
+
+
+def save_tokens_to_db(tokens):
+    session_db = TokenSessionLocal()
+    now = datetime.now(timezone.utc)
+    try:
+        existing_rows = {row.provider: row for row in session_db.query(Token).all()}
+        for provider, token_data in tokens.items():
+            if provider not in {"tiktok", "youtube"}:
+                continue
+            encrypted_access = social_publishing.encrypt_token_value(
+                token_data["access_token"]
+            )
+            encrypted_refresh = social_publishing.encrypt_token_value(
+                token_data["refresh_token"]
+            )
+            expires_at = _timestamp_to_datetime(token_data.get("expires_at"))
+            user_email = token_data.get("user_email")
+            row = existing_rows.get(provider)
+            if row:
+                row.access_token = encrypted_access
+                row.refresh_token = encrypted_refresh
+                row.expires_at = expires_at
+                if user_email is not None:
+                    row.user_email = user_email
+                row.updated_at = now
+            else:
+                session_db.add(
+                    Token(
+                        provider=provider,
+                        user_email=user_email,
+                        access_token=encrypted_access,
+                        refresh_token=encrypted_refresh,
+                        expires_at=expires_at,
+                        updated_at=now,
+                    )
+                )
+        for provider, row in existing_rows.items():
+            if provider not in tokens:
+                session_db.delete(row)
+        session_db.commit()
+    except SQLAlchemyError as exc:
+        session_db.rollback()
+        raise social_publishing.SocialPublishingError(
+            "Não foi possível salvar os tokens sociais no banco de dados."
+        ) from exc
+    finally:
+        session_db.close()
+
+
+def delete_token_from_db(platform):
+    session_db = TokenSessionLocal()
+    try:
+        session_db.query(Token).filter(Token.provider == platform).delete()
+        session_db.commit()
+    except SQLAlchemyError as exc:
+        session_db.rollback()
+        raise social_publishing.SocialPublishingError(
+            "Não foi possível remover o token social do banco de dados."
+        ) from exc
+    finally:
+        session_db.close()
+
+
+social_publishing.configure_token_backend(
+    load_fn=load_tokens_from_db,
+    save_fn=save_tokens_to_db,
+    delete_fn=delete_token_from_db,
+)
 
 
 class DriveError(Exception):
@@ -556,20 +714,56 @@ def get_csrf_token():
     return token
 
 
+def _has_usable_token(token_data):
+    if not isinstance(token_data, dict):
+        return False
+    if token_data.get("refresh_token"):
+        return True
+    if not token_data.get("access_token"):
+        return False
+    expires_at = token_data.get("expires_at")
+    return expires_at is None or float(expires_at) > time.time()
+
+
 @app.context_processor
 def social_template_context():
+    token_error = None
     try:
         tokens = social_publishing.load_social_tokens()
-        token_error = None
     except social_publishing.SocialPublishingError as exc:
         tokens = {}
         token_error = str(exc)
+
+    tiktok_token = tokens.get("tiktok", {})
+    youtube_token = tokens.get("youtube", {})
+    tiktok_connected = _has_usable_token(tiktok_token)
+    youtube_connected = _has_usable_token(youtube_token)
+
+    if (
+        youtube_connected
+        and youtube_token.get("expires_at") is not None
+        and float(youtube_token["expires_at"]) <= time.time() + 60
+        and youtube_token.get("refresh_token")
+    ):
+        try:
+            social_publishing.get_access_token("youtube")
+        except social_publishing.SocialPublishingError as exc:
+            youtube_connected = False
+            token_error = token_error or str(exc)
+
     return {
         "csrf_token": get_csrf_token(),
-        "tiktok_connected": bool(tokens.get("tiktok", {}).get("refresh_token")),
-        "youtube_connected": bool(tokens.get("youtube", {}).get("refresh_token")),
+        "tiktok_connected": tiktok_connected,
+        "youtube_connected": youtube_connected,
         "social_token_error": token_error,
     }
+
+
+def _oauth_redirect_uri_override(platform):
+    env_var = "TIKTOK_REDIRECT_URI" if platform == "tiktok" else "YOUTUBE_REDIRECT_URI"
+    if os.environ.get(env_var, "").strip():
+        return None
+    return url_for("social_oauth_callback", platform=platform, _external=True)
 
 
 @app.route("/oauth/<platform>")
@@ -579,6 +773,8 @@ def start_social_oauth(platform):
     try:
         social_publishing.validate_token_encryption()
         state = secrets.token_urlsafe(32)
+        redirect_override = _oauth_redirect_uri_override(platform)
+        kwargs = {"redirect_uri_override": redirect_override} if redirect_override else {}
         if platform == "tiktok":
             code_verifier = social_publishing.generate_tiktok_code_verifier()
             code_challenge = social_publishing.tiktok_code_challenge(code_verifier)
@@ -586,10 +782,11 @@ def start_social_oauth(platform):
                 platform,
                 state,
                 code_challenge=code_challenge,
+                **kwargs,
             )
             session["oauth_code_verifier_tiktok"] = code_verifier
         else:
-            authorization = social_publishing.authorization_url(platform, state)
+            authorization = social_publishing.authorization_url(platform, state, **kwargs)
         session[f"oauth_state_{platform}"] = state
         return redirect(authorization)
     except social_publishing.SocialPublishingError as exc:
@@ -622,18 +819,46 @@ def social_oauth_callback(platform):
         flash("A sessão PKCE do TikTok expirou. Tente conectar novamente.", "error")
         return redirect(url_for("index"))
     try:
+        redirect_override = _oauth_redirect_uri_override(platform)
+        kwargs = {"redirect_uri_override": redirect_override} if redirect_override else {}
         if platform == "tiktok":
             social_publishing.exchange_authorization_code(
                 platform,
                 code,
                 code_verifier=code_verifier,
+                **kwargs,
             )
         else:
-            social_publishing.exchange_authorization_code(platform, code)
+            social_publishing.exchange_authorization_code(platform, code, **kwargs)
     except social_publishing.SocialPublishingError as exc:
         flash(str(exc), "error")
         return redirect(url_for("index"))
     flash(f"{social_publishing.platform_display_name(platform)} conectado.", "success")
+    return redirect(url_for("index"))
+
+
+@app.route("/oauth/<platform>/disconnect", methods=["POST"])
+def disconnect_social(platform):
+    if platform not in {"tiktok", "youtube"}:
+        return Response("Plataforma inválida.", status=404, mimetype="text/plain")
+    csrf_token = session.get("csrf_token", "")
+    supplied_token = (
+        request.form.get("csrf_token", "") or request.headers.get("X-CSRF-Token", "")
+    )
+    if not csrf_token or not supplied_token or not secrets.compare_digest(
+        csrf_token, supplied_token
+    ):
+        return Response(
+            "A sessão expirou. Atualize a página e tente novamente.",
+            status=400,
+            mimetype="text/plain",
+        )
+    try:
+        social_publishing.delete_social_token(platform)
+    except social_publishing.SocialPublishingError as exc:
+        flash(str(exc), "error")
+        return redirect(url_for("index"))
+    flash(f"{social_publishing.platform_display_name(platform)} desconectado.", "success")
     return redirect(url_for("index"))
 
 

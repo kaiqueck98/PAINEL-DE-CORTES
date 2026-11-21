@@ -1,6 +1,8 @@
 Flask>=3.0,<4.0
 gunicorn>=21.0,<23.0
 APScheduler>=3.10,<4.0
+SQLAlchemy>=2.0,<3.0
+psycopg2-binary>=2.9,<3.0
 cryptography>=41.0,<47.0
 pytz>=2024.1,<2027.0
 python-dotenv>=1.0,<2.0

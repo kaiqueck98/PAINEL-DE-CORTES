@@ -1,4 +1,5 @@
 .env
 social_tokens.enc
 agendamentos.sqlite3
+tokens.sqlite3
 __pycache__/

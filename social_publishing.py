@@ -15,8 +15,12 @@ from cryptography.fernet import Fernet, InvalidToken
 from dotenv import dotenv_values, set_key
 
 
-SOCIAL_TOKENS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "social_tokens.enc")
-SOCIAL_TOKENS_LOCK = threading.Lock()
+_DEFAULT_SOCIAL_TOKENS_FILE = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "social_tokens.enc"
+)
+SOCIAL_TOKENS_FILE = _DEFAULT_SOCIAL_TOKENS_FILE
+SOCIAL_TOKENS_LOCK = threading.RLock()
+_TOKEN_BACKEND = None
 
 TIKTOK_AUTHORIZE_URL = "https://www.tiktok.com/v2/auth/authorize/"
 TIKTOK_TOKEN_URL = "https://open.tiktokapis.com/v2/oauth/token/"
@@ -62,7 +66,9 @@ def ensure_token_encryption_key(dotenv_path=None):
         key = candidate
         break
 
-    should_write_key = not dotenv_key_valid
+    should_write_key = not dotenv_key_valid and (
+        not key or os.path.isfile(dotenv_path)
+    )
     if not key:
         if (environment_key or dotenv_key) and os.path.isfile(SOCIAL_TOKENS_FILE):
             raise SocialPublishingError(
@@ -95,21 +101,23 @@ def platform_display_name(platform):
     return "TikTok" if platform == "tiktok" else "YouTube"
 
 
-def _platform_config(platform):
+def _platform_config(platform, redirect_uri_override=None):
     if platform == "tiktok":
         client_id = os.environ.get("TIKTOK_CLIENT_KEY", "").strip()
         client_secret = os.environ.get("TIKTOK_CLIENT_SECRET", "").strip()
-        redirect_uri = os.environ.get(
-            "TIKTOK_REDIRECT_URI",
-            "http://localhost:5000/oauth/tiktok/callback",
-        ).strip()
+        redirect_uri = (
+            os.environ.get("TIKTOK_REDIRECT_URI", "").strip()
+            or (redirect_uri_override or "").strip()
+            or "http://localhost:5000/oauth/tiktok/callback"
+        )
     elif platform == "youtube":
         client_id = os.environ.get("YOUTUBE_CLIENT_ID", "").strip()
         client_secret = os.environ.get("YOUTUBE_CLIENT_SECRET", "").strip()
-        redirect_uri = os.environ.get(
-            "YOUTUBE_REDIRECT_URI",
-            "http://localhost:5000/oauth/youtube/callback",
-        ).strip()
+        redirect_uri = (
+            os.environ.get("YOUTUBE_REDIRECT_URI", "").strip()
+            or (redirect_uri_override or "").strip()
+            or "http://localhost:5000/oauth/youtube/callback"
+        )
     else:
         raise SocialPublishingError("Plataforma de publicação inválida.")
 
@@ -147,7 +155,42 @@ def validate_token_encryption():
     _fernet()
 
 
+def encrypt_token_value(value):
+    if not isinstance(value, str):
+        raise SocialPublishingError("Valor de token inválido para criptografia.")
+    return _fernet().encrypt(value.encode("utf-8")).decode("ascii")
+
+
+def decrypt_token_value(encrypted_value):
+    if not isinstance(encrypted_value, str):
+        raise SocialPublishingError("Valor de token criptografado inválido.")
+    try:
+        return _fernet().decrypt(encrypted_value.encode("ascii")).decode("utf-8")
+    except (InvalidToken, UnicodeEncodeError, UnicodeDecodeError) as exc:
+        raise SocialPublishingError(
+            "Não foi possível ler os tokens sociais protegidos; confira a chave configurada."
+        ) from exc
+
+
+def configure_token_backend(load_fn=None, save_fn=None, delete_fn=None):
+    global _TOKEN_BACKEND
+    if load_fn and save_fn:
+        _TOKEN_BACKEND = {
+            "load": load_fn,
+            "save": save_fn,
+            "delete": delete_fn,
+        }
+    else:
+        _TOKEN_BACKEND = None
+
+
+def _use_configured_token_backend():
+    return _TOKEN_BACKEND is not None and SOCIAL_TOKENS_FILE == _DEFAULT_SOCIAL_TOKENS_FILE
+
+
 def load_social_tokens():
+    if _use_configured_token_backend():
+        return _TOKEN_BACKEND["load"]()
     if not os.path.isfile(SOCIAL_TOKENS_FILE):
         return {}
     cipher = _fernet()
@@ -176,6 +219,9 @@ def load_social_tokens():
 
 
 def save_social_tokens(tokens):
+    if _use_configured_token_backend():
+        _TOKEN_BACKEND["save"](tokens)
+        return
     cipher = _fernet()
     directory = os.path.dirname(SOCIAL_TOKENS_FILE)
     temporary_path = None
@@ -199,6 +245,46 @@ def save_social_tokens(tokens):
                     "Não foi possível salvar nem limpar o arquivo temporário de tokens."
                 ) from cleanup_error
         raise SocialPublishingError("Não foi possível salvar os tokens sociais protegidos.") from exc
+
+
+def delete_social_token(platform):
+    if platform not in {"tiktok", "youtube"}:
+        raise SocialPublishingError("Plataforma de publicação inválida.")
+    with SOCIAL_TOKENS_LOCK:
+        if _use_configured_token_backend() and _TOKEN_BACKEND.get("delete"):
+            _TOKEN_BACKEND["delete"](platform)
+            return
+        tokens = load_social_tokens()
+        if platform in tokens:
+            tokens.pop(platform)
+            save_social_tokens(tokens)
+
+
+def _extract_user_email(data, token_response=None):
+    for source in (data, token_response):
+        if isinstance(source, dict):
+            for key in ("user_email", "email"):
+                value = source.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+    id_token = (
+        token_response.get("id_token")
+        if isinstance(token_response, dict)
+        else None
+    ) or (data.get("id_token") if isinstance(data, dict) else None)
+    if isinstance(id_token, str) and id_token.count(".") == 2:
+        try:
+            payload_b64 = id_token.split(".")[1]
+            padding = "=" * (-len(payload_b64) % 4)
+            payload = json.loads(
+                base64.urlsafe_b64decode(payload_b64 + padding).decode("utf-8")
+            )
+            email = payload.get("email")
+            if isinstance(email, str) and email.strip():
+                return email.strip()
+        except (ValueError, json.JSONDecodeError, UnicodeDecodeError):
+            pass
+    return None
 
 
 def store_authorized_tokens(platform, token_response):
@@ -225,10 +311,12 @@ def store_authorized_tokens(platform, token_response):
             expires_in = int(data.get("expires_in") or 3600)
         except (TypeError, ValueError) as exc:
             raise SocialPublishingError("A plataforma retornou um prazo de token inválido.") from exc
+        user_email = _extract_user_email(data, token_response)
         tokens[platform] = {
             "access_token": data["access_token"],
             "refresh_token": refresh_token,
             "expires_at": time.time() + expires_in,
+            "user_email": user_email if user_email is not None else previous.get("user_email"),
             "open_id": data.get("open_id", previous.get("open_id", "")),
         }
         save_social_tokens(tokens)
@@ -250,8 +338,10 @@ def tiktok_code_challenge(code_verifier):
     return base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
 
 
-def authorization_url(platform, state, code_challenge=None):
-    client_id, _, redirect_uri = _platform_config(platform)
+def authorization_url(platform, state, code_challenge=None, redirect_uri_override=None):
+    client_id, _, redirect_uri = _platform_config(
+        platform, redirect_uri_override=redirect_uri_override
+    )
     if platform == "tiktok":
         challenge_characters = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
         if (
@@ -327,8 +417,12 @@ def _json_request(url, payload, headers=None, method="POST"):
         raise SocialPublishingError("A plataforma retornou uma resposta inválida.") from exc
 
 
-def exchange_authorization_code(platform, code, code_verifier=None):
-    client_id, client_secret, redirect_uri = _platform_config(platform)
+def exchange_authorization_code(
+    platform, code, code_verifier=None, redirect_uri_override=None
+):
+    client_id, client_secret, redirect_uri = _platform_config(
+        platform, redirect_uri_override=redirect_uri_override
+    )
     fields = {
         "code": code,
         "grant_type": "authorization_code",
