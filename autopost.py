@@ -1,8 +1,131 @@
 import json
 import os
+import math
+import re
+import shutil
+import subprocess
+import tempfile
 import sqlite3
 import uuid
 from contextlib import contextmanager
+
+
+def _media_command(args: list[str], timeout: int = 1800) -> subprocess.CompletedProcess:
+    try:
+        result = subprocess.run(args, capture_output=True, text=True, encoding="utf-8",
+                                errors="replace", timeout=timeout,
+                                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError(f"Não foi possível executar {args[0]}: {exc}") from exc
+    if result.returncode:
+        raise RuntimeError(f"Falha na análise/conversão: {result.stderr[-1800:]}")
+    return result
+
+
+def _media_tools() -> tuple[str, str]:
+    ffmpeg, ffprobe = shutil.which("ffmpeg"), shutil.which("ffprobe")
+    if not ffmpeg or not ffprobe:
+        raise RuntimeError("Instale ffmpeg e ffprobe no PATH antes de rodar automaticamente.")
+    return ffmpeg, ffprobe
+
+
+def analisar_qualidade(video: str | os.PathLike) -> dict:
+    """Heurística: 720p, >=1.5 Mbps, RMS >=-30 dBFS, blur <=5.
+
+    ffprobe lê metadados; ffmpeg mede áudio completo e desfoque a 1 fps.
+    Os limites são configuráveis via AUTOPOST_MIN_BITRATE, AUTOPOST_MIN_AUDIO_DB
+    e AUTOPOST_MAX_BLUR. Não representam garantia perceptual de qualidade.
+    Falhas de análise interrompem o envio, em vez de aprovar um arquivo ilegível.
+    """
+    path = os.path.abspath(os.fspath(video))
+    if not os.path.isfile(path):
+        raise RuntimeError("O vídeo precisa estar baixado antes da análise.")
+    ffmpeg, ffprobe = _media_tools()
+    metadata = json.loads(_media_command([ffprobe, "-v", "error", "-show_streams",
+                         "-show_format", "-of", "json", path], 60).stdout)
+    streams = metadata.get("streams", [])
+    visual = next((s for s in streams if s.get("codec_type") == "video"
+                   and not s.get("disposition", {}).get("attached_pic")), None)
+    audio = next((s for s in streams if s.get("codec_type") == "audio"), None)
+    if not visual:
+        raise RuntimeError("Arquivo sem faixa de vídeo válida.")
+    def numeric(value: object) -> float:
+        try:
+            parsed = float(value)
+            return parsed if math.isfinite(parsed) else 0.0
+        except (ValueError, TypeError):
+            return 0.0
+    width, height = int(visual.get("width", 0)), int(visual.get("height", 0))
+    bitrate = numeric(visual.get("bit_rate"))
+    estimated = bitrate <= 0
+    if estimated:
+        bitrate = max(0, numeric(metadata.get("format", {}).get("bit_rate"))
+                      - sum(numeric(s.get("bit_rate")) for s in streams if s.get("codec_type") == "audio"))
+    args = [ffmpeg, "-hide_banner", "-nostdin", "-nostats", "-i", path,
+            "-map", f"0:{visual['index']}", "-vf", "fps=1,blurdetect"]
+    if audio:
+        args += ["-map", f"0:{audio['index']}", "-af", "volumedetect"]
+    log = _media_command(args + ["-f", "null", "-"]).stderr
+    blur_match = re.search(r"blur mean:\s*([\d.eE+\-]+|inf|nan)", log, re.I)
+    volume_match = re.search(r"mean_volume:\s*([\d.\-]+|-inf)\s*dB", log)
+    if not blur_match or (audio and not volume_match):
+        raise RuntimeError("FFmpeg não retornou as métricas de desfoque/áudio esperadas.")
+    blur = float(blur_match.group(1))
+    volume = float(volume_match.group(1)) if volume_match else None
+    reasons = []
+    if min(width, height) < 720:
+        reasons.append("resolução abaixo de 720p")
+    if bitrate < float(os.environ.get("AUTOPOST_MIN_BITRATE", "1500000")):
+        reasons.append("bitrate baixo ou desconhecido")
+    if not math.isfinite(blur) or blur > float(os.environ.get("AUTOPOST_MAX_BLUR", "5")):
+        reasons.append("possível desfoque")
+    if volume is None or not math.isfinite(volume) or volume < float(os.environ.get("AUTOPOST_MIN_AUDIO_DB", "-30")):
+        reasons.append("áudio ausente, silencioso ou baixo")
+    return {"qualidade": "RUIM" if reasons else "BOA", "motivos": reasons,
+            "width": width, "height": height, "bitrate": bitrate,
+            "bitrate_estimado": estimated, "blur": blur if math.isfinite(blur) else None,
+            "audio_db": volume if volume is not None and math.isfinite(volume) else None,
+            "has_audio": audio is not None}
+
+
+def verificar_qualidade(video: str | os.PathLike) -> str:
+    return analisar_qualidade(video)["qualidade"]
+
+
+def melhorar_video(video: str | os.PathLike, *, analise: dict | None = None,
+                   output_dir: str | None = None) -> str:
+    """Mantém BOA intacta; processa RUIM sem sobrescrever o original.
+
+    Cada job deve usar seu próprio diretório. Sem output_dir, cria um diretório
+    isolado junto ao original. Nitidez não recupera detalhe perdido nem áudio ausente.
+    """
+    source = os.path.abspath(os.fspath(video))
+    report = analise if analise is not None else analisar_qualidade(source)
+    if report["qualidade"] == "BOA":
+        return source
+    ffmpeg, ffprobe = _media_tools()
+    directory = output_dir or tempfile.mkdtemp(prefix="autopost-", dir=os.path.dirname(source))
+    os.makedirs(directory, exist_ok=True)
+    output = os.path.join(directory, "video_melhorado.mp4")
+    if os.path.normcase(os.path.abspath(output)) == os.path.normcase(source):
+        raise RuntimeError("A saída não pode sobrescrever o vídeo original.")
+    command = [ffmpeg, "-hide_banner", "-nostdin", "-nostats", "-y", "-i", source,
+               "-map", "0:v:0", "-map", "0:a:0?", "-vf",
+               "scale=trunc(iw/2)*2:trunc(ih/2)*2,unsharp=5:5:0.7:5:5:0,eq=brightness=0.02:contrast=1.05",
+               "-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p"]
+    if report["has_audio"]:
+        command += ["-af", "loudnorm=I=-16:TP=-1.5:LRA=11", "-c:a", "aac", "-b:a", "192k", "-ar", "48000"]
+    command += ["-movflags", "+faststart", output]
+    try:
+        _media_command(command, 3600)
+        info = json.loads(_media_command([ffprobe, "-v", "error", "-show_streams", "-of", "json", output], 60).stdout)
+        if not any(s.get("codec_type") == "video" for s in info.get("streams", [])):
+            raise RuntimeError("O arquivo melhorado não contém vídeo válido.")
+    except Exception:
+        if os.path.isfile(output):
+            os.remove(output)
+        raise
+    return output
 
 
 class AutopostStoreError(Exception):
@@ -43,6 +166,8 @@ class AutopostStore:
                         videos_per_day INTEGER NOT NULL,
                         times_json TEXT NOT NULL,
                         destinations_json TEXT NOT NULL,
+                        title_template TEXT NOT NULL DEFAULT '',
+                        hashtags_template TEXT NOT NULL DEFAULT '',
                         timezone TEXT NOT NULL,
                         status TEXT NOT NULL,
                         last_status TEXT,
@@ -80,6 +205,17 @@ class AutopostStore:
                         ON autopost_history (created_at DESC);
                     """
                 )
+                schedule_columns = {
+                    row["name"] for row in connection.execute("PRAGMA table_info(autopost_schedules)")
+                }
+                if "title_template" not in schedule_columns:
+                    connection.execute(
+                        "ALTER TABLE autopost_schedules ADD COLUMN title_template TEXT NOT NULL DEFAULT ''"
+                    )
+                if "hashtags_template" not in schedule_columns:
+                    connection.execute(
+                        "ALTER TABLE autopost_schedules ADD COLUMN hashtags_template TEXT NOT NULL DEFAULT ''"
+                    )
         except sqlite3.Error as exc:
             raise AutopostStoreError("Não foi possível inicializar o banco de agendamentos.") from exc
 
@@ -88,6 +224,8 @@ class AutopostStore:
         schedule = dict(row)
         schedule["times"] = json.loads(schedule.pop("times_json"))
         schedule["destinations"] = json.loads(schedule.pop("destinations_json"))
+        schedule.setdefault("title_template", "")
+        schedule.setdefault("hashtags_template", "")
         return schedule
 
     def create_schedule(
@@ -99,16 +237,34 @@ class AutopostStore:
         destinations,
         timezone,
         created_at,
+        title_template="",
+        hashtags_template="",
+        reuse=False,
     ):
         schedule_id = uuid.uuid4().hex
         try:
             with self._connection() as connection:
+                if reuse:
+                    connection.execute("BEGIN IMMEDIATE")
+                    existing = connection.execute(
+                        "SELECT id FROM autopost_schedules WHERE folder_id = ? AND times_json = ? "
+                        "AND destinations_json = ? AND status IN ('active', 'paused') ORDER BY created_at LIMIT 1",
+                        (folder_id, json.dumps(times), json.dumps(destinations)),
+                    ).fetchone()
+                    if existing:
+                        connection.execute(
+                            "UPDATE autopost_schedules SET status='active', title_template=?, "
+                            "hashtags_template=?, videos_per_day=?, updated_at=? WHERE id=?",
+                            (title_template, hashtags_template, videos_per_day, created_at, existing["id"]),
+                        )
+                        return existing["id"]
                 connection.execute(
                     """
                     INSERT INTO autopost_schedules (
                         id, folder_id, folder_name, videos_per_day, times_json,
-                        destinations_json, timezone, status, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)
+                        destinations_json, title_template, hashtags_template,
+                        timezone, status, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)
                     """,
                     (
                         schedule_id,
@@ -117,6 +273,8 @@ class AutopostStore:
                         videos_per_day,
                         json.dumps(times),
                         json.dumps(destinations),
+                        title_template,
+                        hashtags_template,
                         timezone,
                         created_at,
                         created_at,
@@ -383,7 +541,7 @@ class AutopostStore:
             raise AutopostStoreError("Não foi possível salvar o resultado do horário.") from exc
 
     def update_history(self, history_id, status, message, remote_id, now):
-        if status not in {"postado", "rascunho", "falhou"}:
+        if status not in {"postado", "rascunho", "falhou", "analisando", "melhorando", "enviando"}:
             raise ValueError("Status de postagem agendada inválido.")
         try:
             with self._connection() as connection:

@@ -28,18 +28,31 @@ label{display:block;margin:12px 0 6px;font-size:.9rem;font-weight:600}
 <form method="POST">
 <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
 <label>Link da pasta do Google Drive</label>
-<input name="folder_link" placeholder="https://drive.google.com/drive/folders/..." required>
+<input name="folder_link" placeholder="https://drive.google.com/drive/folders/..." value="{{ request.form.get('folder_link', '') }}" required>
 <label>Vídeos por dia</label>
 <input name="videos_per_day" type="number" value="4" min="1" max="10">
 <label>Horários</label>
 <input name="times" value="08:00, 12:30, 18:00, 21:00">
 <p style="color:#a1a1aa;font-size:.82rem">Deixa assim mesmo, já são os 4 melhores.</p>
+<label>Título editável (máx. 70 caracteres)</label>
+<input name="title_template" maxlength="70" placeholder="Título usado nos vídeos agendados">
+<label>Hashtags da pasta</label>
+<input name="hashtags_template" placeholder="#nome-da-pasta">
 <label>Destinos</label>
 <div class="check"><input type="checkbox" name="destinations" value="youtube" checked> YouTube</div>
 <div class="check"><input type="checkbox" name="destinations" value="tiktok" checked> TikTok</div>
 <br><button type="submit" name="action" value="criar">Salvar Agendamento</button>
+<br><br><button type="submit" name="action" value="automatico">RODAR AUTOMÁTICO</button>
+<p>Usa esta pasta e o título editado (ou gera um automaticamente), sem escolher vídeos.
+Ativa 08:00, 12:30, 18:00 e 21:00, horário de São Paulo. YouTube publica; TikTok recebe rascunho.
+Mantenha o servidor ligado. A análise e a conversão começam no horário; o envio pode levar alguns minutos.</p>
 </form>
 </div>
+<section class="card">
+<h3>Acompanhamento automático</h3>
+<p id="auto-status" role="status">Carregando histórico…</p>
+<div id="auto-history"></div>
+</section>
 <h3>Agendamentos criados</h3>
 {% for s in schedules %}
 <div class="card">
@@ -63,5 +76,29 @@ Status: <b>{{ s.status }}</b><br>
 <p style="color:#a1a1aa">Nenhum agendamento ainda. Cria o primeiro ali em cima.</p>
 {% endfor %}
 </main>
+<script>
+(() => {
+  async function refresh() {
+    const status = document.getElementById('auto-status');
+    try {
+      const response = await fetch({{ url_for('progresso_automatico')|tojson }}, {
+        headers: {'X-CSRF-Token': {{ csrf_token|tojson }}}, cache: 'no-store'
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Falha ao consultar o histórico.');
+      const container = document.getElementById('auto-history');
+      container.replaceChildren();
+      for (const row of data.history) {
+        const item = document.createElement('p');
+        item.textContent = `${row.run_date} ${row.run_time} | ${row.video_name} | ${row.platform} | ${row.status}: ${row.message || 'Aguardando análise'}`;
+        container.append(item);
+      }
+      status.textContent = data.history.length ? 'Atualizado automaticamente a cada 3 segundos.' : 'Aguardando o próximo horário agendado.';
+    } catch (error) { status.textContent = error.message; }
+    finally { window.setTimeout(refresh, 3000); }
+  }
+  refresh();
+})();
+</script>
 </body>
 </html>

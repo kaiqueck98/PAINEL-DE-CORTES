@@ -111,7 +111,8 @@ class PanelRouteTests(unittest.TestCase):
         self.assertIn(b"J\xc3\xa1 postados", response.data)
         self.assertIn(b"Baixar v\xc3\xaddeo", response.data)
         self.assertIn(b"Marcar como postado", response.data)
-        self.assertIn(b"T\xc3\xadtulo sugerido para TikTok/Reels", response.data)
+        self.assertIn(b"3 sugest\xc3\xb5es de t\xc3\xadtulo", response.data)
+        self.assertIn(b"T\xc3\xadtulo edit\xc3\xa1vel para YouTube/TikTok", response.data)
         self.assertIn(b"Copiar t\xc3\xadtulo + hashtags", response.data)
         self.assertIn(b"Ver original", response.data)
         self.assertIn(b"Ver melhorado", response.data)
@@ -773,13 +774,24 @@ class VideoSuggestionTests(unittest.TestCase):
             app.score_video(baseline),
         )
 
-    def test_social_suggestions_use_folder_and_file_names(self):
+    def test_social_suggestions_use_three_folder_based_titles_not_filename(self):
+        titles = app.gerar_titulo("Cortes Esportivos (6) - VIDEOS 2", "Final_Golaço.mp4")
+
+        self.assertEqual(len(titles), 3)
+        self.assertTrue(all(len(title) <= 70 for title in titles))
+        combined = " ".join(titles).casefold()
+        self.assertIn("cortes esportivos", combined)
+        self.assertNotIn("final golaço", combined)
+        self.assertNotIn("golaço", combined)
+        self.assertNotIn("mp4", combined)
+
         title, hashtags = app.suggest_social_copy("Cortes Esportivos", "Final_Golaço.mp4")
 
-        self.assertIn("Final Golaço", title)
         self.assertIn("Cortes Esportivos", title)
+        self.assertNotIn("Final Golaço", title)
         self.assertIn("#cortes", hashtags)
-        self.assertIn("#golaco", hashtags)
+        self.assertIn("#esportivos", hashtags)
+        self.assertNotIn("#golaco", hashtags)
 
     def test_file_number_uses_name_number_or_stable_fallback(self):
         self.assertEqual(app.file_number("corte_08.mp4", 2), "08")

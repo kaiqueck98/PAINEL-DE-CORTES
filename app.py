@@ -1632,6 +1632,7 @@ def process_social_post_job(
     title,
     hashtags,
     api_key,
+    quality_callback=None,
 ):
     workdir = None
     published = False
@@ -1652,7 +1653,7 @@ def process_social_post_job(
             ),
             workdir=workdir,
         )
-        improved = copy_completed_improvement(video_id, workdir)
+        improved = copy_completed_improvement(video_id, workdir) if quality_callback is None else None
         if improved:
             video_path, upload_name = improved
             update_social_post_job(
@@ -1664,6 +1665,27 @@ def process_social_post_job(
             upload_name = filename
             video_path = os.path.join(workdir, filename)
             download_video_for_social_post(job_id, video_id, api_key, video_path)
+
+        if quality_callback is not None:
+            quality_callback("analisando", f"Analisando {filename}")
+            update_social_post_job(job_id, status="processing", progress=25,
+                                   message=f"Analisando resolução, bitrate, desfoque e áudio: {filename}")
+            analysis = autopost.analisar_qualidade(video_path)
+            summary = "Qualidade " + analysis["qualidade"]
+            if analysis["motivos"]:
+                summary += ": " + ", ".join(analysis["motivos"])
+            update_social_post_job(job_id, quality_summary=summary)
+            if analysis["qualidade"] == "RUIM":
+                quality_callback("melhorando", summary + " — melhorando nitidez, brilho/contraste e áudio")
+                update_social_post_job(job_id, message=summary + " — melhorando", progress=30)
+                video_path = autopost.melhorar_video(video_path, analise=analysis,
+                                                    output_dir=os.path.join(workdir, "automatico"))
+                upload_name = "video_melhorado.mp4"
+                summary += " | Melhoria aplicada (não garante recuperar detalhes ou áudio ausente)"
+            else:
+                summary += " | Original preservado"
+            update_social_post_job(job_id, quality_summary=summary, message=summary, progress=40)
+            quality_callback("enviando", summary + " | Enviando")
 
         if platform == "tiktok" and os.path.splitext(upload_name)[1].lower() == ".mkv":
             converted_path = os.path.join(workdir, f"{os.path.splitext(upload_name)[0]}.mp4")
@@ -1981,6 +2003,10 @@ def start_scheduled_social_post(item, api_key):
 
 
 def process_scheduled_social_post(job_id, item, filename, title, hashtags, api_key):
+    def quality_progress(status, message):
+        AUTPOST_STORE.update_history(item["id"], status, message, None,
+                                    schedule_now().isoformat(timespec="seconds"))
+
     try:
         process_social_post_job(
             job_id,
@@ -1990,6 +2016,7 @@ def process_scheduled_social_post(job_id, item, filename, title, hashtags, api_k
             title,
             hashtags,
             api_key,
+            quality_callback=quality_progress,
         )
     except (
         OSError,
@@ -2015,6 +2042,8 @@ def process_scheduled_social_post(job_id, item, filename, title, hashtags, api_k
         else:
             status = "falhou"
         message = job.get("message") or "O envio não foi concluído."
+        if job.get("quality_summary"):
+            message = job["quality_summary"] + " | " + message
         if job.get("status") == "pending":
             message = (
                 f"{message} O resultado não foi confirmado; o painel não repetirá "
@@ -2298,7 +2327,7 @@ TITLE_EDITOR_SCRIPT = r"""
     const title = field('title_template', 'Título editável');
     const tags = field('hashtags_template', 'Hashtags da pasta');
     title.maxLength = 70;
-    title.required = true;
+    title.required = false; // Campo vazio usa automaticamente o gerador no servidor.
     const button = document.createElement('button');
     button.type = 'button';
     button.textContent = 'Gerar 3 sugestões pela pasta';
@@ -2358,6 +2387,18 @@ TITLE_EDITOR_SCRIPT = r"""
 """
 
 
+@app.route("/agendamento/progresso")
+def progresso_automatico():
+    token = session.get("csrf_token", "")
+    supplied = request.headers.get("X-CSRF-Token", "")
+    if not token or not supplied or not secrets.compare_digest(token, supplied):
+        return jsonify(error="Atualize a página para acompanhar o progresso."), 403
+    try:
+        return jsonify(history=AUTPOST_STORE.list_history(40))
+    except autopost.AutopostStoreError as exc:
+        return jsonify(error=str(exc)), 503
+
+
 @app.route("/agendamento", methods=["GET", "POST"])
 def agendamento_page():
     erro = None
@@ -2370,7 +2411,7 @@ def agendamento_page():
         else:
             action = request.form.get("action", "")
             try:
-                if action == "criar":
+                if action in {"criar", "automatico"}:
                     folder_link = request.form.get("folder_link", "").strip()
                     folder_id = extract_folder_id(folder_link)
                     api_key = os.environ.get("DRIVE_API_KEY", "").strip()
@@ -2378,9 +2419,24 @@ def agendamento_page():
                     times_raw = request.form.get("times", "08:00, 12:30, 18:00, 21:00")
                     times = [t.strip() for t in times_raw.replace("\n", ",").split(",") if t.strip()]
                     destinations = request.form.getlist("destinations")
-                    if not destinations:
+                    if not destinations and action != "automatico":
                         raise ValueError("Marca pelo menos YouTube ou TikTok.")
                     videos_per_day = int(request.form.get("videos_per_day", "4"))
+                    if action == "automatico":
+                        autopost._media_tools()
+                        times = ["08:00", "12:30", "18:00", "21:00"]
+                        videos_per_day = 4
+                        destinations = ["youtube", "tiktok"]
+                        tokens = social_publishing.load_social_tokens()
+                        if any(not tokens.get(p, {}).get("refresh_token") for p in destinations):
+                            raise ValueError("Conecte YouTube e TikTok antes de rodar automaticamente.")
+                    if not 1 <= videos_per_day <= 10:
+                        raise ValueError("Escolha de 1 a 10 vídeos por dia.")
+                    if not times or any(not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", t) for t in times):
+                        raise ValueError("Horários inválidos. Use HH:MM.")
+                    times = sorted(set(times))
+                    if any(p not in {"youtube", "tiktok"} for p in destinations):
+                        raise ValueError("Destino inválido.")
                     title_template = request.form.get("title_template", "").strip()
                     hashtags_template = request.form.get("hashtags_template", "").strip()
                     if not title_template:
@@ -2394,10 +2450,11 @@ def agendamento_page():
                         AUTPOST_TIMEZONE_NAME, schedule_now().isoformat(timespec="seconds"),
                         title_template,
                         hashtags_template,
+                        reuse=action == "automatico",
                     )
                     sched = AUTPOST_STORE.get_schedule(sid)
                     register_autopost_schedule(sched)
-                    ok = f"Agendamento criado! {folder_name} - {', '.join(times)}"
+                    ok = f"Agendamento ativo! {folder_name} - {', '.join(times)} (São Paulo). O próximo horário disponível inicia a análise e o envio."
                 elif action in {"pausar", "ativar", "cancelar"}:
                     sid = request.form.get("schedule_id", "")
                     novo = {"pausar": "paused", "ativar": "active", "cancelar": "cancelled"}[action]

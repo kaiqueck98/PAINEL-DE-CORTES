@@ -101,6 +101,9 @@
     .suggestions { margin-top: 14px; padding: 12px; border: 1px solid #30313a; border-radius: 9px; background: #191a20; }
     .suggestions h4 { margin: 0 0 5px; color: #a1a1aa; font-size: .75rem; font-weight: 600; }
     .suggestion-field { width: 100%; margin: 0 0 12px; padding: 8px 10px; border: 1px solid #383944; border-radius: 7px; background: #111217; color: #f5f5f5; font: inherit; font-size: .85rem; }
+    .title-suggestions { display: grid; gap: 6px; margin: 0 0 10px; }
+    .title-option { width: 100%; text-align: left; padding: 7px 9px; border: 1px solid #514276; border-radius: 7px; background: #29213b; color: #e9e4ff; cursor: pointer; }
+    .title-option:hover { background: #3b2d58; }
     .copy-status { display: block; min-height: 1.2em; margin-top: 6px; color: #a1a1aa; font-size: .75rem; }
     .model-form { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; align-items: end; gap: 12px; }
     .model-form label { margin: 0; color: #d4d4d8; font-size: .82rem; }
@@ -276,8 +279,14 @@
                     </div>
                     <span class="score">Nota automática: {{ "%.1f"|format(video.score) }}/10</span>
                     <div class="suggestions">
-                      <h4>Título sugerido para TikTok/Reels</h4>
-                      <input class="suggestion-field" type="text" data-suggested-title value="{{ video.suggested_title }}" aria-label="Título sugerido para TikTok/Reels">
+                      <h4>3 sugestões de título (máx. 70 caracteres)</h4>
+                      <div class="title-suggestions">
+                        {% for suggestion in video.title_suggestions %}
+                        <button class="title-option" type="button" data-title-option>{{ suggestion }}</button>
+                        {% endfor %}
+                      </div>
+                      <h4>Título editável para YouTube/TikTok</h4>
+                      <input class="suggestion-field" type="text" maxlength="100" data-suggested-title value="{{ video.suggested_title }}" aria-label="Título editável para YouTube e TikTok">
                       <h4>Hashtags sugeridas</h4>
                       <input class="suggestion-field" type="text" data-suggested-hashtags value="{{ video.suggested_hashtags }}" aria-label="Hashtags sugeridas">
                       <button class="copy-button" type="button" data-copy-title="{{ video.suggested_title }}" data-copy-hashtags="{{ video.suggested_hashtags }}">Copiar título + hashtags</button>
@@ -375,6 +384,14 @@
   </footer>
   <script>
     document.addEventListener("click", async (event) => {
+      const titleOption = event.target.closest("[data-title-option]");
+      if (titleOption) {
+        const card = titleOption.closest(".video");
+        const titleField = card.querySelector("[data-suggested-title]");
+        titleField.value = titleOption.textContent.trim();
+        titleField.focus();
+        return;
+      }
       const socialButton = event.target.closest("[data-social-post]");
       if (socialButton) { await postSocialVideo(socialButton); return; }
       const improveButton = event.target.closest("[data-improve-video]");
@@ -400,7 +417,8 @@
       const card = button.closest(".video"); const platform = button.dataset.platform; const status = card.querySelector(`[data-social-post-status="${platform}"]`); const title = card.querySelector("[data-suggested-title]").value; const hashtags = card.querySelector("[data-suggested-hashtags]").value; const platformName = platform === "tiktok" ? "TikTok" : "YouTube"; button.disabled = true; status.textContent = platform === "tiktok" ? "Preparando rascunho..." : "Preparando publicação...";
       try {
         const body = new URLSearchParams({ filename: button.dataset.filename });
-        if (platform === "youtube") { body.set("title", title); body.set("hashtags", hashtags); }
+        body.set("title", title);
+        body.set("hashtags", hashtags);
         const start = await fetch(`/social-post/${platform}/${encodeURIComponent(button.dataset.videoId)}`, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded", "X-CSRF-Token": document.querySelector('meta[name="csrf-token"]').content }, body });
         const job = await start.json(); if (!start.ok) { const action = platform === "tiktok" ? "enviar o rascunho ao" : "iniciar a publicação no"; throw new Error(job.error || `Não foi possível ${action} ${platformName}.`); }
         while (true) { await new Promise(resolve => setTimeout(resolve, 1200)); const response = await fetch(job.status_url); const state = await response.json(); if (!response.ok) throw new Error(state.error || "Não foi possível consultar a publicação."); status.textContent = state.message; if (state.status === "complete") { if (platform === "tiktok" && state.result_status === "inbox") { button.textContent = "Enviado à caixa de entrada do TikTok"; return; } if (platform === "tiktok" && state.result_status !== "posted") { throw new Error("O TikTok não confirmou o envio do rascunho."); } button.textContent = `Postado no ${platformName}`; status.textContent = `Postado no ${platformName}`; card.classList.add("posted"); const markPostedButton = card.querySelector('input[name="action"][value="mark_posted"]'); if (markPostedButton) { const markButton = markPostedButton.form.querySelector("button"); markButton.disabled = true; markButton.textContent = "Já postado"; } return; } if (state.status === "partial") { button.textContent = `Verificar ${platformName}`; return; } if (state.status === "pending") { button.textContent = `Verificar ${platformName}`; return; } if (state.status === "error") throw new Error(state.message); }
