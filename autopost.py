@@ -1016,6 +1016,7 @@ def _preparar_melhores_do_dia(
     blocked_ids: set[str],
     sample_download=None,
 ) -> list[dict]:
+    total = len(videos)
     day, selected = store.get_day(schedule['id'], run_date)
     if day and day['status'] == 'ready':
         return selected
@@ -1029,7 +1030,41 @@ def _preparar_melhores_do_dia(
     except (OSError, ValueError):
         pass  # O SQLite mantém o bloqueio de repetição mesmo sem o espelho JSON.
     analyzed = []
-    failed = False
+    success_count = 0
+    error_count = 0
+
+    def skipped_message(index, reason):
+        if index < total:
+            return f"Vídeo {index} pulado - {reason}, tentando vídeo {index + 1}"
+        return f"Vídeo {index} pulado - {reason}; não há mais vídeos para tentar"
+
+    def failure_reason(exc):
+        message = str(exc).casefold()
+        if any(
+            marker in message
+            for marker in (
+                "width not divisible by 2",
+                "height not divisible by 2",
+                "error initializing output stream",
+                "erro de tamanho",
+            )
+        ):
+            return "erro de tamanho"
+        if isinstance(exc, MemoryError) or any(
+            marker in message
+            for marker in (
+                "out of memory",
+                "cannot allocate memory",
+                "memory allocation",
+                "limite de memória",
+                "sem memória",
+            )
+        ):
+            return "erro de memória"
+        if isinstance(exc, VideoDownloadError):
+            return "erro do Drive"
+        return "erro de análise"
+
     try:
         validar_analise_conteudo()
         trends = carregar_tendencias()
@@ -1043,7 +1078,6 @@ def _preparar_melhores_do_dia(
             "complete": 0.82,
         }
         for index, video in enumerate(videos, 1):
-            total = len(videos)
             report = {"id": video['id'], "name": video.get('name', ''), "folderName": video.get('folderName', ''),
                       "score": 0, "score_scale": 10, "reasons": [], "steps": [],
                       "message": f"Baixando vídeo {index} de {total}...",
@@ -1135,6 +1169,7 @@ def _preparar_melhores_do_dia(
                     )
                     if any(conteudo_repetido(report, prior) for prior in previous):
                         report.update(status='excluded', message='Conteúdo repetido de um envio anterior', reasons=['duplicata por hash/assinatura visual'])
+                        success_count += 1
                     else:
                         report['content'] = gerar_textos_conteudo(frames, report['transcription'], trends)
                         report.update(status='analyzed', message='Conteúdo analisado; aguardando comparação com todos os candidatos')
@@ -1143,40 +1178,25 @@ def _preparar_melhores_do_dia(
                             f"Analisando vídeo {index} de {total}: título e legenda criados.",
                             "complete",
                         )
-            except MemoryError as exc:
-                report.update(
-                    status="error",
-                    message=f"Estourou a memória no vídeo {index} de {total}.",
-                    reasons=["memória insuficiente"],
-                )
-                store.save_candidate(schedule['id'], run_date, lease, report)
-                raise RuntimeError(report["message"]) from exc
-            except VideoDownloadError as exc:
-                report.update(
-                    status="error",
-                    message=f"Erro do Drive no vídeo {index} de {total}: {exc}",
-                    reasons=["falha ao baixar trecho do Drive"],
-                )
-                store.save_candidate(schedule['id'], run_date, lease, report)
-                raise RuntimeError(report["message"]) from exc
+                        success_count += 1
             except Exception as exc:
-                if any(
-                    marker in str(exc).casefold()
-                    for marker in ("out of memory", "cannot allocate memory", "memory allocation")
-                ):
-                    report.update(
-                        status="error",
-                        message=f"Estourou a memória no vídeo {index} de {total}.",
-                        reasons=["memória insuficiente"],
-                    )
-                    store.save_candidate(schedule['id'], run_date, lease, report)
-                    raise RuntimeError(report["message"]) from exc
-                failed = True
-                report.update(status='error', message=f'Não elegível: {exc}', reasons=['falha de análise; sem título inventado'])
+                reason = failure_reason(exc)
+                report["error_detail"] = str(exc)
+                report.update(
+                    status="error",
+                    message=skipped_message(index, reason),
+                    reasons=[reason],
+                    progress=max(
+                        report.get("progress", 0),
+                        round(((index - 1) + 0.82) / max(total, 1) * 100),
+                    ),
+                )
+                error_count += 1
             finally:
                 gc.collect()
             store.save_candidate(schedule['id'], run_date, lease, report)
         selected, unique = [], []
+        prepare_attempt = 0
         for report in sorted(analyzed, key=lambda r: (-r['score'], r['id'])):
             if any(conteudo_repetido(report, prior) for prior in unique):
                 report.update(status='excluded', message='Duplicata de candidato com nota igual ou maior', reasons=['repetido no lote'])
@@ -1185,7 +1205,8 @@ def _preparar_melhores_do_dia(
                 report['score'] = min(10, report['score'] + 1)
                 report['reasons'].append('+1: não repetido no histórico nem entre candidatos')
                 if len(selected) < min(4, schedule['videos_per_day']):
-                    selected_index = len(selected) + 1
+                    prepare_attempt += 1
+                    selected_index = prepare_attempt
                     prep_total = min(4, total)
                     report['message'] = (
                         f"Preparando vídeo {selected_index} de {prep_total}..."
@@ -1222,25 +1243,21 @@ def _preparar_melhores_do_dia(
                         else:
                             report['improved'] = False
                         report['steps'].append('Melhoria aplicada: video_melhorado.mp4' if report['improved'] else 'Original preservado; riscos precisam estar resolvidos antes da aprovação.')
-                    except MemoryError as exc:
-                        raise RuntimeError(
-                            f"Estourou a memória ao preparar o vídeo {len(selected) + 1} de {min(4, total)}."
-                        ) from exc
-                    except VideoDownloadError as exc:
-                        raise RuntimeError(
-                            f"Erro do Drive ao preparar o vídeo {selected_index} de {prep_total}: {exc}"
-                        ) from exc
                     except Exception as exc:
-                        if any(
-                            marker in str(exc).casefold()
-                            for marker in ("out of memory", "cannot allocate memory", "memory allocation")
-                        ):
-                            raise RuntimeError(
-                                f"Estourou a memória ao preparar o vídeo {selected_index} de {prep_total}."
-                            ) from exc
-                        failed = True
-                        report.update(status='error', message='Falha ao preparar mídia: ' + str(exc))
+                        if success_count:
+                            success_count -= 1
+                        error_count += 1
+                        reason = failure_reason(exc)
+                        report["error_detail"] = str(exc)
+                        report.update(
+                            status="error",
+                            message=skipped_message(
+                                report.get("current_index", selected_index), reason
+                            ),
+                            reasons=[reason],
+                        )
                         store.save_candidate(schedule['id'], run_date, lease, report)
+                        gc.collect()
                         continue
                     selected.append(report)
                     report['message'] = 'Escolhido entre os melhores: ' + '; '.join(report['reasons'])
@@ -1254,9 +1271,20 @@ def _preparar_melhores_do_dia(
                     report['message'] = 'Não selecionado: quatro candidatos obtiveram prioridade maior'
             store.save_candidate(schedule['id'], run_date, lease, report)
             gc.collect()
-        if not selected and failed:
-            raise RuntimeError('Nenhum candidato pôde ser aprovado; consulte os erros de análise.')
-        store.finish_day(schedule['id'], run_date, lease, selected)
+        error = (
+            "Nenhum vídeo foi analisado com sucesso."
+            if total and error_count and not success_count
+            else None
+        )
+        store.finish_day(
+            schedule['id'],
+            run_date,
+            lease,
+            selected,
+            error=error,
+            success_count=success_count,
+            error_count=error_count,
+        )
         return selected
     except Exception as exc:
         store.finish_day(schedule['id'], run_date, lease, [], error=str(exc))
@@ -1555,7 +1583,8 @@ class AutopostStore:
     def update_day_progress(self, schedule_id, run_date, lease, current_index, total, progress, message):
         with self._connection() as connection:
             cursor = connection.execute(
-                "UPDATE content_days SET message=?, updated=?, current_index=?, total=?, progress=? "
+                "UPDATE content_days SET message=?, updated=?, current_index=?, total=?, "
+                "progress=MAX(progress, ?) "
                 "WHERE schedule_id=? AND run_date=? AND lease=? AND status='analyzing'",
                 (
                     message,
@@ -1574,7 +1603,8 @@ class AutopostStore:
     def save_candidate(self, schedule_id, run_date, lease, report):
         with self._connection() as connection:
             cursor = connection.execute(
-                "UPDATE content_days SET message=?, updated=?, current_index=?, total=?, progress=? "
+                "UPDATE content_days SET message=?, updated=?, current_index=?, total=?, "
+                "progress=MAX(progress, ?) "
                 "WHERE schedule_id=? AND run_date=? AND lease=? AND status='analyzing'",
                 (
                     report.get('message', ''),
@@ -1592,7 +1622,16 @@ class AutopostStore:
             connection.execute("INSERT OR REPLACE INTO content_candidates VALUES (?, ?, ?, ?, 0)",
                                (schedule_id, run_date, report['id'], json.dumps(report, ensure_ascii=False)))
 
-    def finish_day(self, schedule_id, run_date, lease, selected, error=None):
+    def finish_day(
+        self,
+        schedule_id,
+        run_date,
+        lease,
+        selected,
+        error=None,
+        success_count=0,
+        error_count=0,
+    ):
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             day = connection.execute(
@@ -1601,15 +1640,19 @@ class AutopostStore:
                 (schedule_id, run_date, lease),
             ).fetchone()
             total = day["total"] if day else 0
+            summary = (
+                f"Pronto! {success_count} de {total}. "
+                f"{success_count} deram certo, {error_count} deram erro."
+            )
             cursor = connection.execute(
                 "UPDATE content_days SET status=?, message=?, updated=?, "
                 "current_index=?, progress=? WHERE schedule_id=? AND run_date=? AND lease=?",
                 (
                     'error' if error else 'ready',
-                    error or f'Pronto! {total} de {total}',
+                    f"{error} {summary}" if error else summary,
                     time.time(),
-                    day["current_index"] if error and day else total,
-                    day["progress"] if error and day else 100,
+                    total,
+                    100,
                     schedule_id,
                     run_date,
                     lease,
@@ -1624,6 +1667,16 @@ class AutopostStore:
     def fail_analysis(self, schedule_id, run_date, message):
         try:
             with self._connection() as connection:
+                day = connection.execute(
+                    "SELECT total, status FROM content_days "
+                    "WHERE schedule_id=? AND run_date=?",
+                    (schedule_id, run_date),
+                ).fetchone()
+                if day and day["status"] == "listing":
+                    message = (
+                        f"{message} 0 de {day['total']} deram certo; "
+                        "0 deram erro antes de iniciar a análise."
+                    )
                 connection.execute(
                     "INSERT INTO content_days "
                     "(schedule_id, run_date, status, lease, updated, message, current_index, total, progress) "

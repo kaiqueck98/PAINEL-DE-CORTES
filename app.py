@@ -1559,16 +1559,20 @@ def download_video_sample_for_analysis(video, api_key, destination, progress_cal
         "-nostdin",
         "-rw_timeout",
         "30000000",
+        "-threads",
+        "1",
         "-i",
         url,
         "-t",
         "20",
+        "-threads",
+        "1",
         "-map",
         "0:v:0",
         "-map",
         "0:a:0?",
         "-vf",
-        "scale=640:640:force_original_aspect_ratio=decrease",
+        "scale=640:640:force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2",
         "-c:v",
         "libx264",
         "-preset",
@@ -1628,7 +1632,8 @@ def download_video_sample_for_analysis(video, api_key, destination, progress_cal
         raise autopost.VideoDownloadError(
             f"Não foi possível baixar o trecho curto do Drive: {exc}"
         ) from exc
-    details = details.replace(api_key, "[redacted]")[-1200:].strip()
+    details = details.replace(api_key, "[redacted]")
+    details = details.replace(quote(api_key, safe=""), "[redacted]")[-1200:].strip()
     if return_code:
         if any(
             marker in details.casefold()
@@ -2278,15 +2283,18 @@ def prepare_schedule_content(schedule_id):
                 video, api_key, path, progress
             ),
         )
-        if schedule['status'] == 'draft':
+        day, _ = AUTPOST_STORE.get_day(schedule_id, run_date)
+        if schedule['status'] == 'draft' and day and day["status"] == "ready":
             AUTPOST_STORE.create_review(schedule_id, run_date)
     except Exception as exc:
         app.logger.error('Falha na preparação de conteúdo: %s', exc)
         try:
-            message = str(exc)
-            if isinstance(exc, MemoryError):
-                message = "Estourou a memória durante a análise dos vídeos do Drive."
-            AUTPOST_STORE.fail_analysis(schedule_id, run_date, message)
+            day, _ = AUTPOST_STORE.get_day(schedule_id, run_date)
+            if not day or day["status"] != "error":
+                message = str(exc)
+                if isinstance(exc, MemoryError):
+                    message = "Estourou a memória durante a análise dos vídeos do Drive."
+                AUTPOST_STORE.fail_analysis(schedule_id, run_date, message)
         except autopost.AutopostStoreError:
             app.logger.exception("Não foi possível registrar erro da análise.")
         AUTPOST_STORE.finish_slot(schedule_id, run_date, 'preparacao',
@@ -2551,6 +2559,7 @@ label{display:block;font-weight:600}.hero button{width:100%;font-size:18px}img{w
 .analysis-progress progress{display:block;width:100%;height:28px;margin:12px 0;accent-color:#7c69ff}
 .analysis-progress .progress-error{color:#ffc0c0}
 .analysis-progress.has-error{border-color:#e5484d;background:#32191e;color:#ffc0c0}
+.analysis-progress.has-error progress{accent-color:#e5484d}
 </style></head><body><main>
 <a href="/">← Painel e contas conectadas</a><h1>Painel de Cortes · Automático</h1>
 <p class="muted">Até 4 vídeos distintos. Conteúdo → nota → melhoria → título → capa → postagem.</p>
@@ -2680,7 +2689,8 @@ TITLE_EDITOR_SCRIPT = r"""
       )[0];
       if (currentDay) {
         const progress = Math.max(0, Math.min(100, Number(currentDay.progress) || 0));
-        const hasError = currentDay.status === 'error';
+        const hasError = currentDay.status === 'error'
+          || /pulado|deram erro/i.test(currentDay.message || '');
         progressBar.value = progress;
         progressPercent.textContent = progress + '%';
         progressMessage.textContent = currentDay.message || 'Análise em andamento...';
@@ -2781,6 +2791,7 @@ TITLE_EDITOR_SCRIPT = r"""
         if (copy.warning) lines.push('Aviso: ' + copy.warning);
         if (video.asset_warning) lines.push(video.asset_warning);
         if (copy.learning?.basis) lines.push(copy.learning.basis);
+        if (video.error_detail) lines.push('Detalhe do erro: ' + video.error_detail);
         for (const [tag, reason] of Object.entries(copy.hashtag_reasons || {})) {
           const source = (copy.hashtag_sources || {})[tag] || {};
           lines.push(`${tag}: ${reason} | ${source.evidence || ''} | ${source.source || ''} | ${source.measured_at || ''}`);

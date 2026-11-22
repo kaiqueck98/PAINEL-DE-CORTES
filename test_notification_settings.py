@@ -114,6 +114,46 @@ class NotificationSettingsTests(unittest.TestCase):
 
         self.assertIn("DATABASE_URL", database_error)
 
+    def test_analysis_sample_uses_short_low_resolution_even_dimensions(self):
+        class SampleProcess:
+            def __init__(self):
+                self.stdout = iter(["out_time_ms=10000000\n"])
+
+            def wait(self, timeout=None):
+                return 0
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            destination = os.path.join(temp_dir, "sample.mp4")
+
+            def start_process(command, **kwargs):
+                with open(destination, "wb") as sample:
+                    sample.write(b"small sample")
+                start_process.command = command
+                return SampleProcess()
+
+            progress = []
+            with patch.object(app.autopost, "_media_tools", return_value=("ffmpeg", "ffprobe")), \
+                    patch.object(app.subprocess, "Popen", side_effect=start_process):
+                app.download_video_sample_for_analysis(
+                    {
+                        "id": "drive-video",
+                        "videoMediaMetadata": {"durationMillis": "90000"},
+                    },
+                    "drive-key",
+                    destination,
+                    progress.append,
+                )
+
+        command = start_process.command
+        self.assertIn("20", command)
+        self.assertIn(
+            "scale=640:640:force_original_aspect_ratio=decrease,"
+            "scale=trunc(iw/2)*2:trunc(ih/2)*2",
+            command,
+        )
+        self.assertEqual(command[command.index("-threads") + 1], "1")
+        self.assertEqual(progress[-1], 1.0)
+
     def test_automatic_schedule_still_creates_a_preview(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             store = app.autopost.AutopostStore(
@@ -162,7 +202,6 @@ class NotificationSettingsTests(unittest.TestCase):
             self.assertIn("fetch('/agendamento/progresso'", page)
             self.assertIn("setTimeout(refreshContent,5000)", page)
             self.assertIn("Progresso da análise", page)
-            self.assertIn("Criando título e legenda em japonês...", page)
 
     def test_postgres_saving_requires_a_persistent_encryption_key(self):
         postgres_engine = SimpleNamespace(

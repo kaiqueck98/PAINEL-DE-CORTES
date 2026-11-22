@@ -104,10 +104,83 @@ class ContentTests(unittest.TestCase):
         self.assertEqual(day["total"], 4)
         self.assertEqual(day["message"], "Criando título e legenda em japonês...")
 
-        self.store.finish_day(self.schedule["id"], "2026-11-21", lease, [])
+        self.store.finish_day(
+            self.schedule["id"],
+            "2026-11-21",
+            lease,
+            [],
+            success_count=4,
+        )
         day = self.store.content_overview("2026-11-21")["days"][0]
         self.assertEqual(day["progress"], 100)
-        self.assertEqual(day["message"], "Pronto! 4 de 4")
+        self.assertEqual(
+            day["message"], "Pronto! 4 de 4. 4 deram certo, 0 deram erro."
+        )
+
+    def test_bad_sample_is_skipped_and_final_progress_counts_successes_and_errors(self):
+        videos = [
+            {"id": "bad", "name": "bad.mp4", "size": "1000",
+             "videoMediaMetadata": {"durationMillis": "60000", "width": "1280", "height": "720"}},
+            {"id": "good", "name": "good.mp4", "size": "2000",
+             "videoMediaMetadata": {"durationMillis": "60000", "width": "1280", "height": "720"}},
+        ]
+        frame_paths = []
+        for index in range(3):
+            frame = Path(self.tmp.name) / f"sample-frame-{index}.jpg"
+            frame.write_bytes(b"small frame")
+            frame_paths.append(str(frame))
+
+        def asset_dir(sha256):
+            directory = Path(self.tmp.name) / "assets" / sha256
+            directory.mkdir(parents=True, exist_ok=True)
+            return directory
+
+        def download_sample(video, destination, progress):
+            if video["id"] == "bad":
+                raise autopost.VideoDownloadError("width not divisible by 2")
+            Path(destination).write_bytes(b"short sample for video two")
+            progress(1.0)
+
+        def prepare_media(report, download):
+            report["improved"] = False
+
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(autopost, "validar_analise_conteudo"))
+            stack.enter_context(patch.object(autopost, "carregar_tendencias", return_value=self.trends))
+            stack.enter_context(patch.object(autopost, "ler_bloqueados", return_value=[]))
+            stack.enter_context(patch.object(autopost, "ler_historico", return_value=[]))
+            stack.enter_context(patch.object(autopost, "video_bloqueado", return_value=False))
+            stack.enter_context(patch.object(autopost, "analisar_qualidade_amostra", return_value=self.quality))
+            stack.enter_context(patch.object(autopost, "extrair_frames", return_value=(frame_paths, ["1", "2", "3"])))
+            stack.enter_context(patch.object(autopost, "verificar_riscos", return_value={"checked": True, "reasons": []}))
+            stack.enter_context(patch.object(autopost, "salvar_primeiro_frame", return_value=frame_paths[0]))
+            stack.enter_context(patch.object(autopost, "transcrever_whisper", return_value="Uma fala curta."))
+            stack.enter_context(patch.object(
+                autopost,
+                "gerar_textos_conteudo",
+                return_value={"summary": "Uma história", "title": "Um título", "hashtags": []},
+            ))
+            stack.enter_context(patch.object(autopost, "asset_directory", side_effect=asset_dir))
+            stack.enter_context(patch.object(autopost, "preparar_midia_selecionada", side_effect=prepare_media))
+            stack.enter_context(patch.object(autopost, "gerar_capa", return_value="cover.jpg"))
+            selected = autopost.preparar_melhores_do_dia(
+                self.store,
+                self.schedule,
+                "2026-11-21",
+                videos,
+                Mock(),
+                set(),
+                sample_download=download_sample,
+            )
+
+        day = self.store.content_overview("2026-11-21")["days"][0]
+        reports = self.store.content_overview("2026-11-21")["videos"]
+        failed_report = next(report for report in reports if report["id"] == "bad")
+        self.assertEqual([report["id"] for report in selected], ["good"])
+        self.assertIn("Vídeo 1 pulado - erro de tamanho, tentando vídeo 2", failed_report["message"])
+        self.assertIn("1 deram certo, 1 deram erro", day["message"])
+        self.assertEqual(day["progress"], 100)
+        self.assertEqual(day["status"], "ready")
 
     def test_story_then_copy_only_allowlisted_tags(self):
         frames = []
