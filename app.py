@@ -5,6 +5,7 @@ import os
 import re
 import secrets
 import shutil
+import sqlite3
 import subprocess
 import tempfile
 import threading
@@ -22,6 +23,9 @@ from apscheduler.triggers.cron import CronTrigger
 from dotenv import load_dotenv
 DOTENV_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
 load_dotenv(dotenv_path=DOTENV_FILE)
+SOCIAL_TOKEN_ENCRYPTION_KEY_CONFIGURED = bool(
+    os.environ.get("SOCIAL_TOKEN_ENCRYPTION_KEY", "").strip()
+)
 
 from flask import Flask, Response, flash, jsonify, redirect, render_template, render_template_string, request, send_file, session, stream_with_context, url_for
 from sqlalchemy import Column, DateTime, Integer, String, Text, create_engine
@@ -110,6 +114,13 @@ class Token(TokenBase):
     refresh_token = Column(Text, nullable=False)
     expires_at = Column(DateTime(timezone=True), nullable=True)
     updated_at = Column(DateTime(timezone=True), nullable=False)
+
+
+class NotificationSetting(TokenBase):
+    __tablename__ = "notification_settings"
+
+    id = Column(Integer, primary_key=True)
+    value = Column(Text, nullable=False)
 
 
 TOKEN_ENGINE = create_token_engine()
@@ -242,6 +253,14 @@ class PostedVideosError(Exception):
 
 
 class SocialPostsError(Exception):
+    pass
+
+
+class NotificationSettingsError(Exception):
+    pass
+
+
+class TelegramNotificationError(Exception):
     pass
 
 
@@ -2343,7 +2362,12 @@ label{display:block;font-weight:600}.hero button{width:100%;font-size:18px}img{w
 <p class="muted">Até 4 vídeos distintos. Conteúdo → nota → melhoria → título → capa → postagem.</p>
 {% if erro %}<p class="notice" role="alert">{{ erro }}</p>{% endif %}
 {% if ok %}<p class="card" role="status">{{ ok }}</p>{% endif %}
+{% for category, message in get_flashed_messages(with_categories=true) %}
+<p class="{{ 'notice' if category == 'error' else 'card' }}" role="{{ 'alert' if category == 'error' else 'status' }}">{{ message }}</p>
+{% endfor %}
 {% for warning in warnings %}<p class="notice">{{ warning }}</p>{% endfor %}
+<p role="status">{{ 'Telegram configurado ✅' if telegram_configured else 'Telegram não configurado' }}</p>
+{% if notification_error %}<p class="notice" role="alert">Erro ao ler configurações: {{ notification_error }}</p>{% endif %}
 <form method="post" class="card hero" id="automatic-form">
 <input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input type="hidden" name="action" value="automatico">
 <label for="folder">Pasta principal do Google Drive</label>
@@ -2363,6 +2387,10 @@ value="{{ '' if field.endswith('TOKEN') else notification_values.get(field,'') }
 <p>Token vazio mantém o valor salvo. Telegram: inicie uma conversa com seu bot. WhatsApp: use número com país e DDD,
 access token, Phone Number ID e template aprovado com um parâmetro de corpo para a mensagem. Idioma padrão: pt_BR.</p>
 <button type="submit">Salvar avisos</button></form></details>
+<form method="post" action="/agendamento/notificacoes/testar" class="card">
+<input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+<button type="submit">TESTAR TELEGRAM</button>
+</form>
 <details class="card"><summary>Agendamentos existentes e controle</summary>
 {% for s in schedules %}<div class="card"><strong>{{ s.folder_name }}</strong><p>{{ s.status }} · {{ ', '.join(s.times) }}</p>
 <p>{{ s.last_message or 'Aguardando' }}</p>
@@ -2544,11 +2572,188 @@ NOTIFICATION_FIELDS = ('TELEGRAM_BOT_TOKEN', 'TELEGRAM_CHAT_ID', 'WHATSAPP_NUMER
                        'WHATSAPP_TEMPLATE', 'WHATSAPP_TEMPLATE_LANGUAGE')
 
 
+def require_notification_database():
+    if os.environ.get("RENDER") and TOKEN_ENGINE.dialect.name == "sqlite":
+        raise NotificationSettingsError(
+            "Configure DATABASE_URL com o PostgreSQL do Supabase no serviço "
+            "Render para persistir as configurações."
+        )
+
+
+def require_persistent_notification_key():
+    require_notification_database()
+    if (
+        TOKEN_ENGINE.dialect.name != "sqlite"
+        and not SOCIAL_TOKEN_ENCRYPTION_KEY_CONFIGURED
+    ):
+        raise NotificationSettingsError(
+            "Configure SOCIAL_TOKEN_ENCRYPTION_KEY como variável persistente "
+            "do serviço antes de salvar credenciais no banco."
+        )
+
+
+def _decode_notification_settings(encrypted_value):
+    try:
+        saved = json.loads(social_publishing.decrypt_token_value(encrypted_value))
+    except (social_publishing.SocialPublishingError, json.JSONDecodeError) as exc:
+        raise NotificationSettingsError(
+            f"Não foi possível ler as configurações criptografadas: {exc}"
+        ) from exc
+    if not isinstance(saved, dict):
+        raise NotificationSettingsError(
+            "A linha de configurações do banco tem um formato inválido."
+        )
+    settings = {}
+    for key in NOTIFICATION_FIELDS:
+        value = saved.get(key, "")
+        if not isinstance(value, str):
+            raise NotificationSettingsError(
+                f"O valor salvo para {key} tem um formato inválido."
+            )
+        settings[key] = value
+    return settings
+
+
+def _read_legacy_notification_settings():
+    try:
+        with AUTPOST_STORE._connection() as db:
+            row = db.execute(
+                "SELECT value FROM notification_settings WHERE id=1"
+            ).fetchone()
+    except sqlite3.Error as exc:
+        raise NotificationSettingsError(
+            f"Não foi possível consultar as configurações antigas: {exc}"
+        ) from exc
+    return _decode_notification_settings(row[0]) if row else {}
+
+
+def _load_notification_settings_from_db():
+    require_notification_database()
+    session_db = TokenSessionLocal()
+    try:
+        row = session_db.get(NotificationSetting, 1)
+        if row:
+            return _decode_notification_settings(row.value)
+
+        legacy_settings = _read_legacy_notification_settings()
+        if legacy_settings:
+            require_persistent_notification_key()
+            encrypted = social_publishing.encrypt_token_value(
+                json.dumps(legacy_settings, ensure_ascii=False)
+            )
+            session_db.add(NotificationSetting(id=1, value=encrypted))
+            session_db.commit()
+        return legacy_settings
+    except SQLAlchemyError as exc:
+        session_db.rollback()
+        raise NotificationSettingsError(
+            f"Erro ao acessar o banco de configurações: {exc}"
+        ) from exc
+    except social_publishing.SocialPublishingError as exc:
+        session_db.rollback()
+        raise NotificationSettingsError(
+            f"Erro ao criptografar as configurações: {exc}"
+        ) from exc
+    finally:
+        session_db.close()
+
+
+def notification_settings_with_status():
+    database_error = ""
+    try:
+        saved = _load_notification_settings_from_db()
+    except NotificationSettingsError as exc:
+        saved = {}
+        database_error = str(exc)
+    settings = {
+        key: saved.get(key, "").strip() or os.environ.get(key, "").strip()
+        for key in NOTIFICATION_FIELDS
+    }
+    return settings, database_error
+
+
 def notification_settings():
-    with AUTPOST_STORE._connection() as db:
-        row = db.execute('SELECT value FROM notification_settings WHERE id=1').fetchone()
-    saved = json.loads(social_publishing.decrypt_token_value(row[0])) if row else {}
-    return {key: saved.get(key, os.environ.get(key, '')) for key in NOTIFICATION_FIELDS}
+    settings, database_error = notification_settings_with_status()
+    if database_error:
+        raise NotificationSettingsError(database_error)
+    return settings
+
+
+def save_notification_settings(settings):
+    stored_settings = {
+        key: settings.get(key, "").strip()
+        for key in NOTIFICATION_FIELDS
+    }
+    try:
+        require_persistent_notification_key()
+        encrypted = social_publishing.encrypt_token_value(
+            json.dumps(stored_settings, ensure_ascii=False)
+        )
+    except NotificationSettingsError:
+        raise
+    except social_publishing.SocialPublishingError as exc:
+        raise NotificationSettingsError(
+            f"Erro ao criptografar as configurações: {exc}"
+        ) from exc
+
+    session_db = TokenSessionLocal()
+    try:
+        row = session_db.get(NotificationSetting, 1)
+        if row:
+            row.value = encrypted
+        else:
+            session_db.add(NotificationSetting(id=1, value=encrypted))
+        session_db.commit()
+    except SQLAlchemyError as exc:
+        session_db.rollback()
+        raise NotificationSettingsError(
+            f"Erro ao salvar no banco de configurações: {exc}"
+        ) from exc
+    finally:
+        session_db.close()
+
+
+def send_telegram_message(bot_token, chat_id, message):
+    if not bot_token or not chat_id:
+        raise ValueError("Configure TELEGRAM_BOT_TOKEN e TELEGRAM_CHAT_ID.")
+    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+    payload = {"chat_id": chat_id, "text": message[:4096]}
+    req = Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urlopen(req, timeout=12) as response:
+            result = json.load(response)
+    except HTTPError as exc:
+        try:
+            details = json.loads(exc.read().decode("utf-8"))
+            description = (
+                details.get("description", "") if isinstance(details, dict) else ""
+            )
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            description = ""
+        detail = f": {description}" if description else ""
+        raise TelegramNotificationError(
+            f"Telegram recusou a mensagem (HTTP {exc.code}){detail}."
+        ) from None
+    except (URLError, TimeoutError) as exc:
+        reason = getattr(exc, "reason", None)
+        detail = f": {reason}" if reason else ""
+        raise TelegramNotificationError(
+            f"Falha de conexão com o Telegram{detail}."
+        ) from None
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise TelegramNotificationError(
+            "Telegram retornou uma resposta inválida."
+        ) from exc
+    if not isinstance(result, dict) or result.get("ok") is not True:
+        description = result.get("description", "") if isinstance(result, dict) else ""
+        detail = f": {description}" if description else ""
+        raise TelegramNotificationError(
+            f"Telegram não confirmou o envio{detail}."
+        )
 
 
 @app.route('/agendamento/notificacoes', methods=['POST'])
@@ -2567,12 +2772,42 @@ def salvar_notificacoes():
         if number and not 8 <= len(number) <= 15:
             raise ValueError('Número WhatsApp inválido. Use país + DDD + número.')
         settings['WHATSAPP_NUMERO'] = number
-        encrypted = social_publishing.encrypt_token_value(json.dumps(settings))
-        with AUTPOST_STORE._connection() as db:
-            db.execute('INSERT OR REPLACE INTO notification_settings VALUES(1,?)', (encrypted,))
-        return redirect(url_for('agendamento_page'))
-    except Exception:
-        return 'Não foi possível salvar as configurações. Confira os campos e a chave de criptografia.', 400
+        save_notification_settings(settings)
+    except ValueError as exc:
+        flash(f"Erro ao salvar: {exc}", "error")
+    except NotificationSettingsError as exc:
+        app.logger.error("Falha ao salvar configurações de avisos: %s", exc)
+        flash(f"Erro ao salvar: {exc}", "error")
+    else:
+        flash("Salvo no banco ✅", "success")
+    return redirect(url_for('agendamento_page'))
+
+
+@app.route('/agendamento/notificacoes/testar', methods=['POST'])
+def testar_telegram():
+    token = session.get('csrf_token', '')
+    if not token or not secrets.compare_digest(token, request.form.get('csrf_token', '')):
+        return 'Sessão expirou.', 403
+    settings, database_error = notification_settings_with_status()
+    try:
+        send_telegram_message(
+            settings["TELEGRAM_BOT_TOKEN"],
+            settings["TELEGRAM_CHAT_ID"],
+            "✅ Mensagem de teste do Painel de Cortes.",
+        )
+    except (TelegramNotificationError, ValueError) as exc:
+        flash(f"Erro ao testar Telegram: {exc}", "error")
+    else:
+        if database_error:
+            app.logger.error("Telegram testado via Environment; banco indisponível: %s", database_error)
+            flash(
+                "Telegram testado via Environment ✅. "
+                f"Banco indisponível: {database_error}",
+                "success",
+            )
+        else:
+            flash("Telegram: mensagem de teste enviada ✅", "success")
+    return redirect(url_for('agendamento_page'))
 
 
 def notification_overview():
@@ -2608,7 +2843,7 @@ def notify_scheduled_result(history_id):
             return
     results = []
     try:
-        settings = notification_settings()
+        settings, _ = notification_settings_with_status()
         def send(url, payload, headers=None):
             req = Request(url, data=json.dumps(payload).encode('utf-8'),
                           headers={'Content-Type':'application/json', **(headers or {})})
@@ -2617,9 +2852,9 @@ def notify_scheduled_result(history_id):
         token, chat = settings['TELEGRAM_BOT_TOKEN'], settings['TELEGRAM_CHAT_ID']
         if token and chat:
             try:
-                response = send('https://api.telegram.org/bot'+token+'/sendMessage', {'chat_id':chat,'text':message[:4096]})
-                results.append('Telegram: aviso enviado' if response.get('ok') else 'Telegram: envio recusado')
-            except Exception:
+                send_telegram_message(token, chat, message)
+                results.append('Telegram: aviso enviado')
+            except TelegramNotificationError:
                 results.append('Telegram: falha ao enviar aviso; confira token, chat ID e conexão')
         else:
             results.append('Telegram: token ou chat ID ausente; aviso disponível no painel')
@@ -2869,12 +3104,15 @@ def agendamento_page():
     except Exception as exc:
         schedules = []
         erro = erro or str(exc)
-    try:
-        notification_values = {k:v for k,v in notification_settings().items() if not k.endswith('TOKEN')}
-    except Exception:
-        notification_values = {}
+    settings, notification_error = notification_settings_with_status()
+    notification_values = {k: v for k, v in settings.items() if not k.endswith('TOKEN')}
+    telegram_configured = bool(
+        settings['TELEGRAM_BOT_TOKEN'] and settings['TELEGRAM_CHAT_ID']
+    )
     html = render_template_string(AUTOMATIC_PANEL, schedules=schedules, erro=erro, ok=ok,
                                   notification_fields=NOTIFICATION_FIELDS, notification_values=notification_values,
+                                  notification_error=notification_error,
+                                  telegram_configured=telegram_configured,
                                   warnings=automatic_warnings(), csrf_token=get_csrf_token())
     script = TITLE_EDITOR_SCRIPT.replace("__CONTENT_ENDPOINT__", url_for("progresso_automatico"))
     script = script.replace('__COVER_ENDPOINT__', url_for('automatic_cover', sha256='SHA'))
