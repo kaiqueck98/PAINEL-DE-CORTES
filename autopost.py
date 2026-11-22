@@ -1,6 +1,7 @@
 import json
 import os
 import math
+import gc
 import re
 import shutil
 import subprocess
@@ -27,6 +28,8 @@ def _media_command(args: list[str], timeout: int = 1800) -> subprocess.Completed
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise RuntimeError(f"Não foi possível executar {args[0]}: {exc}") from exc
     if result.returncode:
+        if result.returncode == -9:
+            raise MemoryError("FFmpeg foi encerrado pelo limite de memória.")
         raise RuntimeError(f"Falha na análise/conversão: {result.stderr[-1800:]}")
     return result
 
@@ -98,8 +101,46 @@ def analisar_qualidade(video: str | os.PathLike) -> dict:
             "duration": numeric(metadata.get("format", {}).get("duration"))}
 
 
+def analisar_qualidade_amostra(video: str | os.PathLike, drive_metadata: dict) -> dict:
+    quality = analisar_qualidade(video)
+    sample_duration = quality["duration"]
+    media = drive_metadata.get("videoMediaMetadata") or {}
+    try:
+        width = int(media.get("width", quality["width"]))
+        height = int(media.get("height", quality["height"]))
+        duration = int(media.get("durationMillis", 0)) / 1000
+        size = int(drive_metadata.get("size", 0))
+    except (TypeError, ValueError):
+        width = height = duration = size = 0
+    if width > 0:
+        quality["width"] = width
+    if height > 0:
+        quality["height"] = height
+    if duration > 0:
+        quality["duration"] = duration
+    quality["sample_duration"] = sample_duration
+    bitrate = size * 8 / duration if size > 0 and duration > 0 else 0
+    quality["bitrate"] = bitrate
+    quality["bitrate_estimado"] = True
+    reasons = []
+    if min(quality["width"], quality["height"]) < 720:
+        reasons.append("resolução abaixo de 720p")
+    if bitrate < float(os.environ.get("AUTOPOST_MIN_BITRATE", "1500000")):
+        reasons.append("bitrate baixo ou desconhecido")
+    if quality["blur"] is None or quality["blur"] > float(
+        os.environ.get("AUTOPOST_MAX_BLUR", "5")
+    ):
+        reasons.append("possível desfoque")
+    if quality["audio_db"] is None or quality["audio_db"] < float(
+        os.environ.get("AUTOPOST_MIN_AUDIO_DB", "-30")
+    ):
+        reasons.append("áudio ausente, silencioso ou baixo")
+    quality["qualidade"] = "RUIM" if reasons else "BOA"
+    quality["motivos"] = reasons
+    return quality
+
+
 _WHISPER_LOCK = threading.Lock()
-_WHISPER_MODEL = None
 _HISTORY_LOCK = threading.RLock()
 
 
@@ -303,18 +344,27 @@ def transcrever_whisper(video: str, directory: str, has_audio: bool) -> str:
     ffmpeg, _ = _media_tools()
     wav = os.path.join(directory, "audio.wav")
     _media_command([ffmpeg, "-v", "error", "-nostdin", "-y", "-i", video, "-vn", "-ac", "1",
-                    "-ar", "16000", "-c:a", "pcm_s16le", wav])
-    global _WHISPER_MODEL
+                    "-t", "20", "-ar", "16000", "-c:a", "pcm_s16le", wav])
     with _WHISPER_LOCK:
+        model = None
+        result = None
         try:
             import whisper
-            if _WHISPER_MODEL is None:
-                _WHISPER_MODEL = whisper.load_model(os.environ.get("WHISPER_MODEL", "base"), device="cpu")
-            result = _WHISPER_MODEL.transcribe(wav, fp16=False, condition_on_previous_text=False)
+            model_name = "tiny" if os.environ.get("RENDER") else os.environ.get(
+                "WHISPER_MODEL", "tiny"
+            )
+            model = whisper.load_model(model_name, device="cpu")
+            result = model.transcribe(
+                wav, fp16=False, condition_on_previous_text=False, verbose=False
+            )
             return ' '.join(segment["text"].strip() for segment in result.get("segments", [])
                             if segment.get("no_speech_prob", 0) < 0.6).strip()
         except (ImportError, OSError, RuntimeError) as exc:
             raise RuntimeError("Falha no Whisper local; verifique a instalação e o modelo.") from exc
+        finally:
+            del result
+            del model
+            gc.collect()
 
 
 _FREE_MODEL_CACHE = (0.0, [])
@@ -570,7 +620,7 @@ def gravar_titulo_japones(report: dict, japanese: dict | None = None) -> None:
         canvas.save(overlay)
         _media_command([ffmpeg,'-y','-v','error','-i',str(base),'-i',overlay,
             '-filter_complex',"[0:v:0][1:v:0]overlay=0:0:enable='lt(t,2)'[video]",
-            '-map','[video]','-map','0:a?','-c:v','libx264','-preset','fast','-crf','20',
+            '-map','[video]','-map','0:a?','-c:v','libx264','-threads','1','-preset','fast','-crf','20',
             '-pix_fmt','yuv420p','-c:a','aac','-b:a','192k','-movflags','+faststart',output])
         preview = str(Path(temporary)/'primeiro_frame.jpg')
         _media_command([ffmpeg,'-y','-v','error','-i',output,'-frames:v','1',preview],60)
@@ -761,7 +811,8 @@ def melhorar_video(video: str | os.PathLike, *, analise: dict | None = None,
     command = [ffmpeg, "-hide_banner", "-nostdin", "-nostats", "-y", "-i", source,
                "-map", "0:v:0", "-map", "0:a:0?", "-vf",
                "scale=trunc(iw/2)*2:trunc(ih/2)*2,unsharp=5:5:0.7:5:5:0,eq=brightness=0.02:contrast=1.05",
-               "-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p"]
+               "-c:v", "libx264", "-threads", "1", "-preset", "medium",
+               "-crf", "18", "-pix_fmt", "yuv420p"]
     if report["has_audio"]:
         command += ["-af", "loudnorm=I=-16:TP=-1.5:LRA=11", "-c:a", "aac", "-b:a", "192k", "-ar", "48000"]
     command += ["-movflags", "+faststart", output]
@@ -783,8 +834,10 @@ def preparar_midia_selecionada(report: dict, download) -> None:
     with tempfile.TemporaryDirectory(prefix='painel-selected-') as temporary:
         original = os.path.join(temporary, 'original.mp4')
         download(report['id'], original)
-        if hash_video(original) != report['sha256']:
+        expected_size = report.get("drive_size")
+        if expected_size and os.path.getsize(original) != int(expected_size):
             raise RuntimeError('O vídeo mudou durante a seleção; será necessário analisar novamente.')
+        report["source_sha256"] = hash_video(original)
         if report['quality']['qualidade'] == 'RUIM':
             output = melhorar_video(original, analise=report['quality'], output_dir=str(directory))
             report['improved'] = True
@@ -930,12 +983,43 @@ def exigir_video_seguro(report: dict, *, require_render: bool = True) -> None:
         raise RuntimeError('RISCO: ' + '; '.join(risk['reasons']))
 
 
-def preparar_melhores_do_dia(store, schedule: dict, run_date: str, videos: list[dict],
-                            download, blocked_ids: set[str]) -> list[dict]:
+_ANALYSIS_LOCK = threading.Lock()
+
+
+def preparar_melhores_do_dia(
+    store,
+    schedule: dict,
+    run_date: str,
+    videos: list[dict],
+    download,
+    blocked_ids: set[str],
+    sample_download=None,
+) -> list[dict]:
+    with _ANALYSIS_LOCK:
+        return _preparar_melhores_do_dia(
+            store,
+            schedule,
+            run_date,
+            videos,
+            download,
+            blocked_ids,
+            sample_download,
+        )
+
+
+def _preparar_melhores_do_dia(
+    store,
+    schedule: dict,
+    run_date: str,
+    videos: list[dict],
+    download,
+    blocked_ids: set[str],
+    sample_download=None,
+) -> list[dict]:
     day, selected = store.get_day(schedule['id'], run_date)
     if day and day['status'] == 'ready':
         return selected
-    lease = store.begin_day(schedule['id'], run_date)
+    lease = store.begin_day(schedule['id'], run_date, total=len(videos))
     if not lease:
         raise RuntimeError("A análise completa do dia ainda está em andamento; nenhum vídeo será escolhido por ordem de chegada.")
     used_ids, previous = store.used_content()
@@ -949,14 +1033,31 @@ def preparar_melhores_do_dia(store, schedule: dict, run_date: str, videos: list[
     try:
         validar_analise_conteudo()
         trends = carregar_tendencias()
+        stage_weights = {
+            "analyzing": 0.20,
+            "metadata": 0.30,
+            "frames": 0.46,
+            "risk": 0.58,
+            "transcription": 0.72,
+            "titles": 0.80,
+            "complete": 0.82,
+        }
         for index, video in enumerate(videos, 1):
+            total = len(videos)
             report = {"id": video['id'], "name": video.get('name', ''), "folderName": video.get('folderName', ''),
                       "score": 0, "score_scale": 10, "reasons": [], "steps": [],
-                      "message": f"Analisando vídeo {index}/{len(videos)}", "status": "analyzing"}
-            def step(message):
+                      "message": f"Baixando vídeo {index} de {total}...",
+                      "status": "analyzing", "current_index": index, "total": total,
+                      "progress": round((index - 1) / max(total, 1) * 100)}
+
+            def step(message, stage):
                 report['message'] = message
                 report['steps'].append(message)
+                report["progress"] = round(
+                    ((index - 1) + stage_weights[stage]) / max(total, 1) * 100
+                )
                 store.save_candidate(schedule['id'], run_date, lease, report)
+
             if video['id'] in blocked_ids:
                 report.update(status='excluded', message='Vídeo repetido: já reservado, enviado ou marcado como postado', reasons=['repetido'])
                 store.save_candidate(schedule['id'], run_date, lease, report)
@@ -964,38 +1065,116 @@ def preparar_melhores_do_dia(store, schedule: dict, run_date: str, videos: list[
             store.save_candidate(schedule['id'], run_date, lease, report)
             try:
                 with tempfile.TemporaryDirectory(prefix='painel-content-') as directory:
-                    source = os.path.join(directory, 'source.mp4')
-                    download(video['id'], source)
-                    step(f'Vídeo {index}: download concluído; verificando qualidade')
-                    report['sha256'] = hash_video(source)
-                    if video_bloqueado(report):
-                        raise RuntimeError('Este conteúdo já está em bloqueados.json, inclusive sob outro ID.')
-                    report['quality'] = analisar_qualidade(source)
+                    source = os.path.join(directory, 'analysis-sample.mp4')
+                    if sample_download:
+                        def sample_progress(fraction):
+                            bounded = max(0.0, min(1.0, float(fraction)))
+                            report["message"] = f"Baixando vídeo {index} de {total}..."
+                            report["progress"] = round(
+                                ((index - 1) + bounded * 0.12) / max(total, 1) * 100
+                            )
+                            store.update_day_progress(
+                                schedule['id'], run_date, lease, index, total,
+                                report["progress"], report["message"],
+                            )
+
+                        sample_download(video, source, sample_progress)
+                        report["drive_size"] = int(video.get("size", 0) or 0)
+                        report["drive_duration"] = int(
+                            (video.get("videoMediaMetadata") or {}).get("durationMillis", 0) or 0
+                        ) / 1000
+                        step(
+                            f"Analisando vídeo {index} de {total}...",
+                            "analyzing",
+                        )
+                        report["sha256"] = hash_video(source)
+                        if video_bloqueado(report):
+                            raise RuntimeError('Este conteúdo já está em bloqueados.json, inclusive sob outro ID.')
+                        report['quality'] = analisar_qualidade_amostra(source, video)
+                    else:
+                        download(video['id'], source)
+                        step(f'Analisando vídeo {index} de {total}...', "analyzing")
+                        report['sha256'] = hash_video(source)
+                        if video_bloqueado(report):
+                            raise RuntimeError('Este conteúdo já está em bloqueados.json, inclusive sob outro ID.')
+                        report['quality'] = analisar_qualidade(source)
                     report['score'], report['reasons'] = pontuar_video(report['quality'])
-                    step(f"Vídeo {index}: {'BOM' if report['quality']['qualidade'] == 'BOA' else 'RUIM'}; extraindo 3 frames")
-                    frames, report['visual_hashes'] = extrair_frames(source, report['quality']['duration'], directory)
+                    step(
+                        f"Analisando vídeo {index} de {total}: verificando qualidade e extraindo frames...",
+                        "metadata",
+                    )
+                    sample_duration = report['quality'].get(
+                        "sample_duration", report['quality']['duration']
+                    )
+                    frames, report['visual_hashes'] = extrair_frames(
+                        source, sample_duration, directory
+                    )
                     report['analysis_frames'] = []
                     for frame_index, frame in enumerate(frames):
                         saved_frame = asset_directory(report['sha256']) / f'analysis_{frame_index}.jpg'
                         shutil.copy2(frame, saved_frame)
                         report['analysis_frames'].append(str(saved_frame))
+                    step(
+                        f"Analisando vídeo {index} de {total}: frames prontos.",
+                        "frames",
+                    )
                     report['risk'] = verificar_riscos(report, frames)
-                    step('Triagem: ' + ('; '.join(report['risk']['reasons']) or ('concluída' if report['risk']['checked'] else report['risk']['warning'])))
+                    step(
+                        'Triagem: ' + ('; '.join(report['risk']['reasons']) or ('concluída' if report['risk']['checked'] else report['risk']['warning'])),
+                        "risk",
+                    )
                     report['first_frame'] = salvar_primeiro_frame(source, report['sha256'])
-                    step(f'Vídeo {index}: 3 frames extraídos; transcrevendo áudio com Whisper')
+                    step(
+                        f"Analisando vídeo {index} de {total}: transcrevendo trecho curto...",
+                        "transcription",
+                    )
                     report['transcription'] = transcrever_whisper(source, directory, report['quality']['has_audio'])
-                    step(f'Vídeo {index}: transcrição concluída; gerando história e título')
+                    step(
+                        "Criando título e legenda em japonês...",
+                        "titles",
+                    )
                     if any(conteudo_repetido(report, prior) for prior in previous):
                         report.update(status='excluded', message='Conteúdo repetido de um envio anterior', reasons=['duplicata por hash/assinatura visual'])
                     else:
                         report['content'] = gerar_textos_conteudo(frames, report['transcription'], trends)
-                        step('Título gerado: ' + report['content']['title'])
-                        step('Hashtags: ' + (' '.join(report['content']['hashtags']) or 'nenhuma pertinente e atual'))
                         report.update(status='analyzed', message='Conteúdo analisado; aguardando comparação com todos os candidatos')
                         analyzed.append(report)
+                        step(
+                            f"Analisando vídeo {index} de {total}: título e legenda criados.",
+                            "complete",
+                        )
+            except MemoryError as exc:
+                report.update(
+                    status="error",
+                    message=f"Estourou a memória no vídeo {index} de {total}.",
+                    reasons=["memória insuficiente"],
+                )
+                store.save_candidate(schedule['id'], run_date, lease, report)
+                raise RuntimeError(report["message"]) from exc
+            except VideoDownloadError as exc:
+                report.update(
+                    status="error",
+                    message=f"Erro do Drive no vídeo {index} de {total}: {exc}",
+                    reasons=["falha ao baixar trecho do Drive"],
+                )
+                store.save_candidate(schedule['id'], run_date, lease, report)
+                raise RuntimeError(report["message"]) from exc
             except Exception as exc:
+                if any(
+                    marker in str(exc).casefold()
+                    for marker in ("out of memory", "cannot allocate memory", "memory allocation")
+                ):
+                    report.update(
+                        status="error",
+                        message=f"Estourou a memória no vídeo {index} de {total}.",
+                        reasons=["memória insuficiente"],
+                    )
+                    store.save_candidate(schedule['id'], run_date, lease, report)
+                    raise RuntimeError(report["message"]) from exc
                 failed = True
                 report.update(status='error', message=f'Não elegível: {exc}', reasons=['falha de análise; sem título inventado'])
+            finally:
+                gc.collect()
             store.save_candidate(schedule['id'], run_date, lease, report)
         selected, unique = [], []
         for report in sorted(analyzed, key=lambda r: (-r['score'], r['id'])):
@@ -1006,15 +1185,59 @@ def preparar_melhores_do_dia(store, schedule: dict, run_date: str, videos: list[
                 report['score'] = min(10, report['score'] + 1)
                 report['reasons'].append('+1: não repetido no histórico nem entre candidatos')
                 if len(selected) < min(4, schedule['videos_per_day']):
-                    report['message'] = 'Escolhido pelo ranking; preparando vídeo antes de agendar'
+                    selected_index = len(selected) + 1
+                    prep_total = min(4, total)
+                    report['message'] = (
+                        f"Preparando vídeo {selected_index} de {prep_total}..."
+                    )
+                    prep_base = 0.82 + (
+                        (selected_index - 1) / max(prep_total, 1) * 0.17
+                    )
+                    report["progress"] = round(prep_base * 100)
                     store.save_candidate(schedule['id'], run_date, lease, report)
                     try:
                         if report['risk']['checked'] and not report['risk']['reasons']:
-                            preparar_midia_selecionada(report, download)
+                            def prepare_download_progress(fraction):
+                                bounded = max(0.0, min(1.0, float(fraction)))
+                                progress = round(
+                                    (prep_base + bounded * 0.17 / max(prep_total, 1))
+                                    * 100
+                                )
+                                report["progress"] = min(99, progress)
+                                report["message"] = (
+                                    f"Preparando vídeo {selected_index} de {prep_total}..."
+                                )
+                                store.update_day_progress(
+                                    schedule['id'], run_date, lease, selected_index,
+                                    prep_total, report["progress"], report["message"],
+                                )
+
+                            if sample_download:
+                                prepare_download = lambda vid, path: download(
+                                    vid, path, prepare_download_progress
+                                )
+                            else:
+                                prepare_download = download
+                            preparar_midia_selecionada(report, prepare_download)
                         else:
                             report['improved'] = False
                         report['steps'].append('Melhoria aplicada: video_melhorado.mp4' if report['improved'] else 'Original preservado; riscos precisam estar resolvidos antes da aprovação.')
+                    except MemoryError as exc:
+                        raise RuntimeError(
+                            f"Estourou a memória ao preparar o vídeo {len(selected) + 1} de {min(4, total)}."
+                        ) from exc
+                    except VideoDownloadError as exc:
+                        raise RuntimeError(
+                            f"Erro do Drive ao preparar o vídeo {selected_index} de {prep_total}: {exc}"
+                        ) from exc
                     except Exception as exc:
+                        if any(
+                            marker in str(exc).casefold()
+                            for marker in ("out of memory", "cannot allocate memory", "memory allocation")
+                        ):
+                            raise RuntimeError(
+                                f"Estourou a memória ao preparar o vídeo {selected_index} de {prep_total}."
+                            ) from exc
                         failed = True
                         report.update(status='error', message='Falha ao preparar mídia: ' + str(exc))
                         store.save_candidate(schedule['id'], run_date, lease, report)
@@ -1030,6 +1253,7 @@ def preparar_melhores_do_dia(store, schedule: dict, run_date: str, videos: list[
                 else:
                     report['message'] = 'Não selecionado: quatro candidatos obtiveram prioridade maior'
             store.save_candidate(schedule['id'], run_date, lease, report)
+            gc.collect()
         if not selected and failed:
             raise RuntimeError('Nenhum candidato pôde ser aprovado; consulte os erros de análise.')
         store.finish_day(schedule['id'], run_date, lease, selected)
@@ -1121,6 +1345,10 @@ class AutopostStoreError(Exception):
     pass
 
 
+class VideoDownloadError(RuntimeError):
+    pass
+
+
 class AutopostStore:
     def __init__(self, database_path):
         self.database_path = database_path
@@ -1205,6 +1433,8 @@ class AutopostStore:
                     CREATE TABLE IF NOT EXISTS content_days (
                         schedule_id TEXT NOT NULL, run_date TEXT NOT NULL,
                         status TEXT NOT NULL, lease TEXT, updated REAL NOT NULL, message TEXT NOT NULL DEFAULT '',
+                        current_index INTEGER NOT NULL DEFAULT 0, total INTEGER NOT NULL DEFAULT 0,
+                        progress INTEGER NOT NULL DEFAULT 0,
                         PRIMARY KEY(schedule_id, run_date)
                     );
                     CREATE TABLE IF NOT EXISTS content_candidates (
@@ -1228,6 +1458,14 @@ class AutopostStore:
                     connection.execute(
                         "ALTER TABLE autopost_schedules ADD COLUMN hashtags_template TEXT NOT NULL DEFAULT ''"
                     )
+                day_columns = {
+                    row["name"] for row in connection.execute("PRAGMA table_info(content_days)")
+                }
+                for column in ("current_index", "total", "progress"):
+                    if column not in day_columns:
+                        connection.execute(
+                            f"ALTER TABLE content_days ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0"
+                        )
         except sqlite3.Error as exc:
             raise AutopostStoreError("Não foi possível inicializar o banco de agendamentos.") from exc
 
@@ -1263,22 +1501,92 @@ class AutopostStore:
                                       (schedule_id, run_date)).fetchall()
         return (dict(day) if day else None), sorted([json.loads(r[0]) for r in rows], key=lambda r: (-r['score'], r['id']))
 
-    def begin_day(self, schedule_id, run_date):
+    def begin_day(self, schedule_id, run_date, total=0):
         lease, now = uuid.uuid4().hex, time.time()
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute("SELECT * FROM content_days WHERE schedule_id=? AND run_date=?", (schedule_id, run_date)).fetchone()
             if row and (row['status'] == 'ready' or (row['status'] == 'analyzing' and now - row['updated'] < 21600)):
                 return None
-            connection.execute("INSERT OR REPLACE INTO content_days VALUES (?, ?, 'analyzing', ?, ?, 'Iniciando análise de todos os vídeos')",
-                               (schedule_id, run_date, lease, now))
+            connection.execute(
+                "INSERT OR REPLACE INTO content_days "
+                "(schedule_id, run_date, status, lease, updated, message, current_index, total, progress) "
+                "VALUES (?, ?, 'analyzing', ?, ?, ?, 0, ?, 0)",
+                (schedule_id, run_date, lease, now, f"Iniciando análise de {total} vídeos", total),
+            )
             connection.execute("DELETE FROM content_candidates WHERE schedule_id=? AND run_date=?", (schedule_id, run_date))
         return lease
 
+    def begin_listing(self, schedule_id, run_date, total=0):
+        now = time.time()
+        try:
+            with self._connection() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                row = connection.execute(
+                    "SELECT status, updated FROM content_days "
+                    "WHERE schedule_id=? AND run_date=?",
+                    (schedule_id, run_date),
+                ).fetchone()
+                if row and (
+                    row["status"] == "ready"
+                    or (
+                        row["status"] in {"listing", "analyzing"}
+                        and now - row["updated"] < 21600
+                    )
+                ):
+                    return False
+                connection.execute(
+                    "INSERT OR REPLACE INTO content_days "
+                    "(schedule_id, run_date, status, lease, updated, message, "
+                    "current_index, total, progress) "
+                    "VALUES (?, ?, 'listing', NULL, ?, ?, 0, ?, 0)",
+                    (
+                        schedule_id,
+                        run_date,
+                        now,
+                        "Lendo metadados dos vídeos do Drive...",
+                        total,
+                    ),
+                )
+            return True
+        except sqlite3.Error as exc:
+            raise AutopostStoreError("Não foi possível iniciar a listagem de vídeos.") from exc
+
+    def update_day_progress(self, schedule_id, run_date, lease, current_index, total, progress, message):
+        with self._connection() as connection:
+            cursor = connection.execute(
+                "UPDATE content_days SET message=?, updated=?, current_index=?, total=?, progress=? "
+                "WHERE schedule_id=? AND run_date=? AND lease=? AND status='analyzing'",
+                (
+                    message,
+                    time.time(),
+                    current_index,
+                    total,
+                    max(0, min(99, int(progress))),
+                    schedule_id,
+                    run_date,
+                    lease,
+                ),
+            )
+        if not cursor.rowcount:
+            raise RuntimeError("A análise perdeu sua reserva de execução.")
+
     def save_candidate(self, schedule_id, run_date, lease, report):
         with self._connection() as connection:
-            cursor = connection.execute("UPDATE content_days SET message=?, updated=? WHERE schedule_id=? AND run_date=? AND lease=?",
-                                        (report.get('message', ''), time.time(), schedule_id, run_date, lease))
+            cursor = connection.execute(
+                "UPDATE content_days SET message=?, updated=?, current_index=?, total=?, progress=? "
+                "WHERE schedule_id=? AND run_date=? AND lease=? AND status='analyzing'",
+                (
+                    report.get('message', ''),
+                    time.time(),
+                    report.get("current_index", 0),
+                    report.get("total", 0),
+                    max(0, min(99, int(report.get("progress", 0)))),
+                    schedule_id,
+                    run_date,
+                    lease,
+                ),
+            )
             if not cursor.rowcount:
                 raise RuntimeError("A análise perdeu sua reserva de execução.")
             connection.execute("INSERT OR REPLACE INTO content_candidates VALUES (?, ?, ?, ?, 0)",
@@ -1287,14 +1595,45 @@ class AutopostStore:
     def finish_day(self, schedule_id, run_date, lease, selected, error=None):
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            cursor = connection.execute("UPDATE content_days SET status=?, message=?, updated=? WHERE schedule_id=? AND run_date=? AND lease=?",
-                              ('error' if error else 'ready', error or f'{len(selected)} melhores selecionados após análise completa',
-                               time.time(), schedule_id, run_date, lease))
+            day = connection.execute(
+                "SELECT total, current_index, progress FROM content_days "
+                "WHERE schedule_id=? AND run_date=? AND lease=?",
+                (schedule_id, run_date, lease),
+            ).fetchone()
+            total = day["total"] if day else 0
+            cursor = connection.execute(
+                "UPDATE content_days SET status=?, message=?, updated=?, "
+                "current_index=?, progress=? WHERE schedule_id=? AND run_date=? AND lease=?",
+                (
+                    'error' if error else 'ready',
+                    error or f'Pronto! {total} de {total}',
+                    time.time(),
+                    day["current_index"] if error and day else total,
+                    day["progress"] if error and day else 100,
+                    schedule_id,
+                    run_date,
+                    lease,
+                ),
+            )
             if not cursor.rowcount:
                 raise RuntimeError("A análise perdeu sua reserva de execução.")
             for video in selected:
                 connection.execute("UPDATE content_candidates SET selected=1 WHERE schedule_id=? AND run_date=? AND video_id=?",
                                    (schedule_id, run_date, video['id']))
+
+    def fail_analysis(self, schedule_id, run_date, message):
+        try:
+            with self._connection() as connection:
+                connection.execute(
+                    "INSERT INTO content_days "
+                    "(schedule_id, run_date, status, lease, updated, message, current_index, total, progress) "
+                    "VALUES (?, ?, 'error', NULL, ?, ?, 0, 0, 0) "
+                    "ON CONFLICT(schedule_id, run_date) DO UPDATE SET "
+                    "status='error', updated=excluded.updated, message=excluded.message",
+                    (schedule_id, run_date, time.time(), message),
+                )
+        except sqlite3.Error as exc:
+            raise AutopostStoreError("Não foi possível registrar a falha da análise.") from exc
 
     def used_content(self):
         with self._connection() as connection:

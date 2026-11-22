@@ -134,7 +134,7 @@ class NotificationSettingsTests(unittest.TestCase):
                     patch.object(app.threading, "Thread"), \
                     patch.object(app, "automatic_warnings", return_value=[]):
                 csrf = self.csrf_token()
-                response = self.client.post(
+                post_response = self.client.post(
                     "/agendamento",
                     data={
                         "action": "automatico",
@@ -142,6 +142,9 @@ class NotificationSettingsTests(unittest.TestCase):
                         "folder_link": "https://drive.google.com/drive/folders/folder-123",
                     },
                 )
+                self.assertEqual(post_response.status_code, 302)
+                self.assertEqual(post_response.headers["Location"], "/agendamento")
+                response = self.client.get(post_response.headers["Location"])
 
             page = response.get_data(as_text=True)
             schedules = store.list_schedules()
@@ -152,6 +155,14 @@ class NotificationSettingsTests(unittest.TestCase):
             self.assertEqual(
                 schedules[0]["times"], ["08:00", "12:30", "18:00", "21:00"]
             )
+            self.assertIn(
+                'value="https://drive.google.com/drive/folders/folder-123"', page
+            )
+            self.assertIn("painel-de-cortes:agendamento:folder-link:v1", page)
+            self.assertIn("fetch('/agendamento/progresso'", page)
+            self.assertIn("setTimeout(refreshContent,5000)", page)
+            self.assertIn("Progresso da análise", page)
+            self.assertIn("Criando título e legenda em japonês...", page)
 
     def test_postgres_saving_requires_a_persistent_encryption_key(self):
         postgres_engine = SimpleNamespace(

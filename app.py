@@ -123,6 +123,13 @@ class NotificationSetting(TokenBase):
     value = Column(Text, nullable=False)
 
 
+class AutomationSetting(TokenBase):
+    __tablename__ = "automation_settings"
+
+    id = Column(Integer, primary_key=True)
+    drive_folder_link = Column(Text, nullable=False, default="")
+
+
 TOKEN_ENGINE = create_token_engine()
 TokenSessionLocal = sessionmaker(
     bind=TOKEN_ENGINE, autoflush=False, expire_on_commit=False
@@ -260,6 +267,10 @@ class NotificationSettingsError(Exception):
     pass
 
 
+class AutomationSettingsError(Exception):
+    pass
+
+
 class TelegramNotificationError(Exception):
     pass
 
@@ -320,7 +331,7 @@ def list_folder_contents(folder_id, api_key):
         params = {
             "q": query,
             "pageSize": 1000,
-            "fields": "nextPageToken,files(id,name,mimeType,webViewLink,thumbnailLink,videoMediaMetadata)",
+            "fields": "nextPageToken,files(id,name,mimeType,size,webViewLink,thumbnailLink,videoMediaMetadata)",
         }
         if page_token:
             params["pageToken"] = page_token
@@ -1486,7 +1497,9 @@ def copy_completed_improvement(video_id, destination_dir):
     return copied_path, latest["output_name"]
 
 
-def download_video_for_social_post(job_id, video_id, api_key, destination):
+def download_video_for_social_post(
+    job_id, video_id, api_key, destination, progress_callback=None
+):
     params = urlencode({"alt": "media", "key": api_key})
     url = f"{DRIVE_API_BASE}/files/{quote(video_id, safe='')}?{params}"
     try:
@@ -1497,9 +1510,9 @@ def download_video_for_social_post(job_id, video_id, api_key, destination):
             message = details.get("error", {}).get("message", "Falha ao baixar vídeo do Google Drive.")
         except (json.JSONDecodeError, UnicodeDecodeError):
             message = "Falha ao baixar vídeo do Google Drive."
-        raise RuntimeError(message) from error
+        raise autopost.VideoDownloadError(message) from error
     except (URLError, TimeoutError) as error:
-        raise RuntimeError("Não foi possível conectar ao Google Drive para preparar a publicação.") from error
+        raise autopost.VideoDownloadError("Não foi possível conectar ao Google Drive para preparar a publicação.") from error
 
     try:
         total_size = int(response.headers.get("Content-Length", 0))
@@ -1515,11 +1528,124 @@ def download_video_for_social_post(job_id, video_id, api_key, destination):
             downloaded += len(chunk)
             if total_size:
                 fraction = min(downloaded / total_size, 1)
+                if progress_callback:
+                    progress_callback(fraction)
                 update_social_post_job(
                     job_id,
                     progress=round(fraction * 25),
                     message=f"Baixando vídeo: {round(fraction * 100)}%",
                 )
+    if progress_callback:
+        progress_callback(1.0)
+
+
+def download_video_sample_for_analysis(video, api_key, destination, progress_callback):
+    duration_ms = int(
+        (video.get("videoMediaMetadata") or {}).get("durationMillis", 0) or 0
+    )
+    if duration_ms <= 0:
+        raise autopost.VideoDownloadError(
+            "O Drive não informou uma duração válida para este vídeo."
+        )
+    ffmpeg, _ = autopost._media_tools()
+    params = urlencode({"alt": "media", "key": api_key})
+    url = f"{DRIVE_API_BASE}/files/{quote(video['id'], safe='')}?{params}"
+    command = [
+        ffmpeg,
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-nostdin",
+        "-rw_timeout",
+        "30000000",
+        "-i",
+        url,
+        "-t",
+        "20",
+        "-map",
+        "0:v:0",
+        "-map",
+        "0:a:0?",
+        "-vf",
+        "scale=640:640:force_original_aspect_ratio=decrease",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "ultrafast",
+        "-threads",
+        "1",
+        "-crf",
+        "30",
+        "-c:a",
+        "aac",
+        "-ac",
+        "1",
+        "-ar",
+        "16000",
+        "-b:a",
+        "48k",
+        "-progress",
+        "pipe:1",
+        "-nostats",
+        "-movflags",
+        "+faststart",
+        destination,
+    ]
+    try:
+        with tempfile.TemporaryFile() as error_output:
+            process = subprocess.Popen(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=error_output,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                bufsize=1,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            if process.stdout is None:
+                raise autopost.VideoDownloadError(
+                    "Não foi possível acompanhar a extração do trecho."
+                )
+            for line in process.stdout:
+                if line.startswith("out_time_ms="):
+                    try:
+                        seconds = int(line.partition("=")[2]) / 1_000_000
+                    except ValueError:
+                        continue
+                    progress_callback(min(1.0, seconds / 20))
+            return_code = process.wait(timeout=120)
+            error_output.seek(0)
+            details = error_output.read().decode("utf-8", errors="replace")
+    except subprocess.TimeoutExpired as exc:
+        process.kill()
+        process.wait()
+        raise autopost.VideoDownloadError(
+            "O Drive demorou demais para fornecer o trecho do vídeo."
+        ) from exc
+    except OSError as exc:
+        raise autopost.VideoDownloadError(
+            f"Não foi possível baixar o trecho curto do Drive: {exc}"
+        ) from exc
+    details = details.replace(api_key, "[redacted]")[-1200:].strip()
+    if return_code:
+        if any(
+            marker in details.casefold()
+            for marker in ("out of memory", "cannot allocate memory", "memory allocation")
+        ):
+            raise MemoryError("FFmpeg ficou sem memória ao gerar o trecho.")
+        if return_code == -9:
+            raise MemoryError("FFmpeg foi encerrado pelo limite de memória.")
+        message = "Não foi possível baixar o trecho curto do Drive."
+        if details:
+            message += " " + details
+        raise autopost.VideoDownloadError(message)
+    if not os.path.isfile(destination) or not os.path.getsize(destination):
+        raise autopost.VideoDownloadError(
+            "O Drive não retornou um trecho de vídeo analisável."
+        )
+    progress_callback(1.0)
 
 
 def convert_video_for_tiktok(video_path, destination, job_id):
@@ -1621,7 +1747,12 @@ def process_social_post_job(
             video_path = os.path.join(workdir, filename)
             download_video_for_social_post(job_id, video_id, api_key, video_path)
 
-        if content_report and not prepared and autopost.hash_video(video_path) != content_report['sha256']:
+        expected_source_hash = (
+            content_report.get("source_sha256", content_report["sha256"])
+            if content_report
+            else ""
+        )
+        if content_report and not prepared and autopost.hash_video(video_path) != expected_source_hash:
             raise RuntimeError("O vídeo mudou depois da análise de conteúdo; envio interrompido para evitar título incorreto.")
         safety_report = content_report or {'id':video_id,'sha256':autopost.hash_video(video_path)}
         if not safety_report.get('risk', {}).get('checked'):
@@ -2074,15 +2205,47 @@ def process_scheduled_social_post(job_id, item, filename, title, hashtags, api_k
             app.logger.exception("Não foi possível salvar o resultado do agendamento.")
 
 
+def select_analysis_candidates(videos, blocked_ids, limit=4):
+    eligible = []
+    for video in videos:
+        if video.get("id") in blocked_ids:
+            continue
+        metadata = video.get("videoMediaMetadata") or {}
+        try:
+            duration = int(metadata.get("durationMillis", 0)) / 1000
+            width = int(metadata.get("width", 0))
+            height = int(metadata.get("height", 0))
+            size = int(video.get("size", 0))
+        except (TypeError, ValueError):
+            continue
+        if duration <= 0 or width <= 0 or height <= 0 or size <= 0:
+            continue
+        bitrate = size * 8 / duration
+        duration_fit = -abs(duration - 60)
+        eligible.append(
+            ((min(width, height), bitrate, duration_fit, video["id"]), video)
+        )
+    eligible.sort(key=lambda item: item[0], reverse=True)
+    return [video for _, video in eligible[:limit]]
+
+
 def prepare_schedule_content(schedule_id):
     """Prepara o ranking às 07:00 e ao ativar; os horários só consomem o ranking."""
     now = schedule_now()
+    run_date = now.strftime('%Y-%m-%d')
     schedule = AUTPOST_STORE.get_schedule(schedule_id)
     if not schedule or schedule['status'] not in {'active', 'draft'}:
         return
     if AUTPOST_STORE.reviews(schedule_id):
         return
     try:
+        if not AUTPOST_STORE.begin_listing(
+            schedule_id, run_date, total=schedule["videos_per_day"]
+        ):
+            day, _ = AUTPOST_STORE.get_day(schedule_id, run_date)
+            if day and day["status"] == "ready" and schedule["status"] == "draft":
+                AUTPOST_STORE.create_review(schedule_id, run_date)
+            return
         api_key = os.environ.get('DRIVE_API_KEY', '').strip()
         if not api_key:
             raise RuntimeError('Configure DRIVE_API_KEY.')
@@ -2092,14 +2255,41 @@ def prepare_schedule_content(schedule_id):
         social = load_social_posts()
         blocked = load_posted_video_ids() | {vid for vid, platforms in social.items()
                   if any(p.get('status') in {'posted', 'inbox', 'processing'} for p in platforms.values())}
+        blocked.update(row.get("video_id") for row in autopost.ler_bloqueados())
+        used_ids, _ = AUTPOST_STORE.used_content()
+        blocked.update(used_ids)
+        candidates = select_analysis_candidates(
+            view.get("all_videos", []), blocked, schedule["videos_per_day"]
+        )
+        if not candidates:
+            raise RuntimeError(
+                "Não há vídeos disponíveis com duração, tamanho e resolução informados pelo Drive."
+            )
         autopost.preparar_melhores_do_dia(
-            AUTPOST_STORE, schedule, now.strftime('%Y-%m-%d'), view.get('all_videos', []),
-            lambda vid, path: download_video_for_social_post('analysis', vid, api_key, path), blocked)
+            AUTPOST_STORE,
+            schedule,
+            run_date,
+            candidates,
+            lambda vid, path, progress=None: download_video_for_social_post(
+                'analysis', vid, api_key, path, progress_callback=progress
+            ),
+            blocked,
+            sample_download=lambda video, path, progress: download_video_sample_for_analysis(
+                video, api_key, path, progress
+            ),
+        )
         if schedule['status'] == 'draft':
-            AUTPOST_STORE.create_review(schedule_id, now.strftime('%Y-%m-%d'))
+            AUTPOST_STORE.create_review(schedule_id, run_date)
     except Exception as exc:
         app.logger.error('Falha na preparação de conteúdo: %s', exc)
-        AUTPOST_STORE.finish_slot(schedule_id, now.strftime('%Y-%m-%d'), 'preparacao',
+        try:
+            message = str(exc)
+            if isinstance(exc, MemoryError):
+                message = "Estourou a memória durante a análise dos vídeos do Drive."
+            AUTPOST_STORE.fail_analysis(schedule_id, run_date, message)
+        except autopost.AutopostStoreError:
+            app.logger.exception("Não foi possível registrar erro da análise.")
+        AUTPOST_STORE.finish_slot(schedule_id, run_date, 'preparacao',
                                  'failed', str(exc), now.isoformat(timespec='seconds'))
 
 
@@ -2357,6 +2547,10 @@ input,select,button{font:inherit;padding:14px;border-radius:10px;border:1px soli
 input[type=url]{width:100%;margin:10px 0 18px}button{background:#7051ec;cursor:pointer;font-weight:700}button:disabled{opacity:.5;cursor:wait}
 label{display:block;font-weight:600}.hero button{width:100%;font-size:18px}img{width:320px;max-width:100%;border-radius:12px}
 .steps{color:#b7c8e8;font-size:14px}summary{cursor:pointer}small{color:#a9b5cb}
+.analysis-progress{padding:18px;border:1px solid #485572;border-radius:12px;background:#101726}
+.analysis-progress progress{display:block;width:100%;height:28px;margin:12px 0;accent-color:#7c69ff}
+.analysis-progress .progress-error{color:#ffc0c0}
+.analysis-progress.has-error{border-color:#e5484d;background:#32191e;color:#ffc0c0}
 </style></head><body><main>
 <a href="/">← Painel e contas conectadas</a><h1>Painel de Cortes · Automático</h1>
 <p class="muted">Até 4 vídeos distintos. Conteúdo → nota → melhoria → título → capa → postagem.</p>
@@ -2371,7 +2565,8 @@ label{display:block;font-weight:600}.hero button{width:100%;font-size:18px}img{w
 <form method="post" class="card hero" id="automatic-form">
 <input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input type="hidden" name="action" value="automatico">
 <label for="folder">Pasta principal do Google Drive</label>
-<input id="folder" name="folder_link" type="url" required value="{{ request.form.get('folder_link','') }}" placeholder="https://drive.google.com/drive/folders/...">
+<input id="folder" name="folder_link" type="url" required value="{{ folder_link }}" placeholder="https://drive.google.com/drive/folders/...">
+<p id="folder-storage-status" class="muted" role="status"></p>
 <button type="submit">RODAR AUTOMÁTICO</button>
 <p>08:00 · 12:30 · 18:00 · 21:00 — horário de São Paulo</p>
 <small>Prepara uma prévia. Só agenda depois de aprovar os quatro vídeos e confirmar. YouTube publica; TikTok envia rascunho.
@@ -2409,6 +2604,35 @@ access token, Phone Number ID e template aprovado com um parâmetro de corpo par
 TITLE_EDITOR_SCRIPT = r"""
 <script>
 (() => {
+  const folderInput = document.getElementById('folder');
+  const folderStorageStatus = document.getElementById('folder-storage-status');
+  const folderStorageKey = 'painel-de-cortes:agendamento:folder-link:v1';
+  if (folderInput) {
+    try {
+      const savedFolderLink = window.localStorage.getItem(folderStorageKey);
+      if (savedFolderLink !== null) folderInput.value = savedFolderLink;
+      else if (folderInput.value) window.localStorage.setItem(folderStorageKey, folderInput.value);
+      if (folderStorageStatus && folderInput.value) {
+        folderStorageStatus.textContent = 'Último link restaurado.';
+      }
+    } catch (error) {
+      if (folderStorageStatus) {
+        folderStorageStatus.textContent = 'Não foi possível acessar o armazenamento local do navegador.';
+      }
+      console.error('Não foi possível restaurar o link da pasta.', error);
+    }
+    folderInput.addEventListener('input', () => {
+      try {
+        window.localStorage.setItem(folderStorageKey, folderInput.value);
+        if (folderStorageStatus) folderStorageStatus.textContent = 'Link salvo neste navegador.';
+      } catch (error) {
+        if (folderStorageStatus) {
+          folderStorageStatus.textContent = 'Não foi possível salvar o link neste navegador.';
+        }
+        console.error('Não foi possível salvar o link da pasta.', error);
+      }
+    });
+  }
   const form = document.querySelector('form [name="folder_link"]')?.form;
   if (form) {
     for (const name of ['title_template', 'hashtags_template']) {
@@ -2425,6 +2649,21 @@ TITLE_EDITOR_SCRIPT = r"""
   const heading = document.createElement('h3');
   heading.textContent = 'Histórias e seleção do dia';
   host.append(heading);
+  const progressCard = document.createElement('section');
+  progressCard.className = 'analysis-progress';
+  progressCard.setAttribute('aria-live', 'polite');
+  const progressHeading = document.createElement('h4');
+  progressHeading.textContent = 'Progresso da análise';
+  const progressBar = document.createElement('progress');
+  progressBar.max = 100;
+  progressBar.value = 0;
+  progressBar.setAttribute('aria-label', 'Progresso da análise');
+  const progressPercent = document.createElement('strong');
+  progressPercent.textContent = '0%';
+  const progressMessage = document.createElement('p');
+  progressMessage.textContent = 'Aguardando início da análise...';
+  progressCard.append(progressHeading, progressBar, progressPercent, progressMessage);
+  host.append(progressCard);
   const body = document.createElement('div'); host.append(body);
   (document.querySelector('main') || document.body).append(host);
   let editing = false;
@@ -2436,6 +2675,18 @@ TITLE_EDITOR_SCRIPT = r"""
       }, cache: 'no-store'});
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || 'Erro ao consultar análise');
+      const currentDay = [...data.content.days].sort(
+        (a, b) => (b.updated || 0) - (a.updated || 0)
+      )[0];
+      if (currentDay) {
+        const progress = Math.max(0, Math.min(100, Number(currentDay.progress) || 0));
+        const hasError = currentDay.status === 'error';
+        progressBar.value = progress;
+        progressPercent.textContent = progress + '%';
+        progressMessage.textContent = currentDay.message || 'Análise em andamento...';
+        progressCard.classList.toggle('has-error', hasError);
+        progressMessage.setAttribute('role', hasError ? 'alert' : 'status');
+      }
       const history = document.getElementById('upload-history');
       if (history) {
         history.replaceChildren();
@@ -2572,12 +2823,19 @@ NOTIFICATION_FIELDS = ('TELEGRAM_BOT_TOKEN', 'TELEGRAM_CHAT_ID', 'WHATSAPP_NUMER
                        'WHATSAPP_TEMPLATE', 'WHATSAPP_TEMPLATE_LANGUAGE')
 
 
-def require_notification_database():
+def require_persistent_configuration_database():
     if os.environ.get("RENDER") and TOKEN_ENGINE.dialect.name == "sqlite":
-        raise NotificationSettingsError(
+        raise AutomationSettingsError(
             "Configure DATABASE_URL com o PostgreSQL do Supabase no serviço "
             "Render para persistir as configurações."
         )
+
+
+def require_notification_database():
+    try:
+        require_persistent_configuration_database()
+    except AutomationSettingsError as exc:
+        raise NotificationSettingsError(str(exc)) from exc
 
 
 def require_persistent_notification_key():
@@ -2590,6 +2848,39 @@ def require_persistent_notification_key():
             "Configure SOCIAL_TOKEN_ENCRYPTION_KEY como variável persistente "
             "do serviço antes de salvar credenciais no banco."
         )
+
+
+def load_drive_folder_link():
+    require_persistent_configuration_database()
+    session_db = TokenSessionLocal()
+    try:
+        row = session_db.get(AutomationSetting, 1)
+        return row.drive_folder_link if row else ""
+    except SQLAlchemyError as exc:
+        raise AutomationSettingsError(
+            f"Erro ao carregar o link da pasta do banco: {exc}"
+        ) from exc
+    finally:
+        session_db.close()
+
+
+def save_drive_folder_link(folder_link):
+    require_persistent_configuration_database()
+    session_db = TokenSessionLocal()
+    try:
+        row = session_db.get(AutomationSetting, 1)
+        if row:
+            row.drive_folder_link = folder_link
+        else:
+            session_db.add(AutomationSetting(id=1, drive_folder_link=folder_link))
+        session_db.commit()
+    except SQLAlchemyError as exc:
+        session_db.rollback()
+        raise AutomationSettingsError(
+            f"Erro ao salvar o link da pasta no banco: {exc}"
+        ) from exc
+    finally:
+        session_db.close()
 
 
 def _decode_notification_settings(encrypted_value):
@@ -3039,6 +3330,10 @@ def automatic_cover(sha256):
 def agendamento_page():
     erro = None
     ok = None
+    automatic_post = (
+        request.method == "POST"
+        and request.form.get("action", "") == "automatico"
+    )
     if request.method == "POST":
         csrf_token = session.get("csrf_token", "")
         supplied = request.form.get("csrf_token", "")
@@ -3050,6 +3345,7 @@ def agendamento_page():
                 if action in {"criar", "automatico"}:
                     folder_link = request.form.get("folder_link", "").strip()
                     folder_id = extract_folder_id(folder_link)
+                    save_drive_folder_link(folder_link)
                     api_key = os.environ.get("DRIVE_API_KEY", "").strip()
                     folder_name = get_folder_name(folder_id, api_key)
                     times_raw = request.form.get("times", "08:00, 12:30, 18:00, 21:00")
@@ -3099,10 +3395,21 @@ def agendamento_page():
                     ok = "Atualizado!"
             except Exception as exc:
                 erro = str(exc)
+    if automatic_post:
+        if erro:
+            flash(erro, "error")
+        elif ok:
+            flash(ok, "success")
+        return redirect(url_for("agendamento_page"))
     try:
         schedules = AUTPOST_STORE.list_schedules()
     except Exception as exc:
         schedules = []
+        erro = erro or str(exc)
+    try:
+        folder_link = load_drive_folder_link()
+    except AutomationSettingsError as exc:
+        folder_link = ""
         erro = erro or str(exc)
     settings, notification_error = notification_settings_with_status()
     notification_values = {k: v for k, v in settings.items() if not k.endswith('TOKEN')}
@@ -3110,6 +3417,7 @@ def agendamento_page():
         settings['TELEGRAM_BOT_TOKEN'] and settings['TELEGRAM_CHAT_ID']
     )
     html = render_template_string(AUTOMATIC_PANEL, schedules=schedules, erro=erro, ok=ok,
+                                  folder_link=folder_link,
                                   notification_fields=NOTIFICATION_FIELDS, notification_values=notification_values,
                                   notification_error=notification_error,
                                   telegram_configured=telegram_configured,

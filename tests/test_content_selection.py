@@ -60,6 +60,55 @@ class ContentTests(unittest.TestCase):
         self.assertFalse(autopost.conteudo_repetido(a, {**a, 'sha256': 'other', 'quality': {**self.quality, 'duration': 50}}))
         self.assertFalse(autopost.conteudo_repetido(a, {**a, 'sha256': 'other', 'transcription': 'Uma fala diferente'}))
 
+    def test_analysis_quality_uses_drive_metadata_and_short_sample_signals(self):
+        sample_quality = {
+            **self.quality,
+            "width": 640,
+            "height": 360,
+            "duration": 20,
+            "bitrate": 900000,
+            "qualidade": "RUIM",
+            "motivos": ["resolução abaixo de 720p"],
+        }
+        video = {
+            "size": "15000000",
+            "videoMediaMetadata": {
+                "durationMillis": "60000",
+                "width": "1920",
+                "height": "1080",
+            },
+        }
+        with patch.object(autopost, "analisar_qualidade", return_value=sample_quality):
+            quality = autopost.analisar_qualidade_amostra("sample.mp4", video)
+
+        self.assertEqual(quality["duration"], 60)
+        self.assertEqual(quality["sample_duration"], 20)
+        self.assertEqual((quality["width"], quality["height"]), (1920, 1080))
+        self.assertEqual(quality["bitrate"], 2_000_000)
+        self.assertEqual(quality["qualidade"], "BOA")
+
+    def test_progress_updates_and_finishes_at_one_hundred_percent(self):
+        lease = self.store.begin_day(self.schedule["id"], "2026-11-21", total=4)
+        self.store.update_day_progress(
+            self.schedule["id"],
+            "2026-11-21",
+            lease,
+            2,
+            4,
+            38,
+            "Criando título e legenda em japonês...",
+        )
+        day = self.store.content_overview("2026-11-21")["days"][0]
+        self.assertEqual(day["progress"], 38)
+        self.assertEqual(day["current_index"], 2)
+        self.assertEqual(day["total"], 4)
+        self.assertEqual(day["message"], "Criando título e legenda em japonês...")
+
+        self.store.finish_day(self.schedule["id"], "2026-11-21", lease, [])
+        day = self.store.content_overview("2026-11-21")["days"][0]
+        self.assertEqual(day["progress"], 100)
+        self.assertEqual(day["message"], "Pronto! 4 de 4")
+
     def test_story_then_copy_only_allowlisted_tags(self):
         frames = []
         for i in range(3):
