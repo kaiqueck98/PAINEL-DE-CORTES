@@ -67,16 +67,60 @@ class ContentTests(unittest.TestCase):
             p.write_bytes(b'fake-image')
             frames.append(str(p))
         story = {'summary': 'Uma pessoa prepara um bolo.', 'uncertainty': '', 'sufficient': True}
-        copy = {'title': 'O preparo deste bolo em detalhes', 'caption_sentences': ['Uma pessoa prepara um bolo.'], 'hashtags': ['#Culinaria']}
-        with patch.object(autopost, '_content_json', side_effect=[story, copy]) as request:
+        copy = {'title': 'O preparo deste bolo em detalhes', 'caption_sentences': ['Uma pessoa prepara um bolo.'],
+                'hashtags': ['#Culinaria'], 'hashtag_reasons': ['A receita envolve culinária.']}
+        japanese = {'text': '爆笑', 'translation': 'muito engraçado',
+                    'reason': 'A pessoa ri enquanto prepara o bolo.', 'sufficient': True}
+        with patch.object(autopost, '_content_json', side_effect=[story, copy, japanese]) as request:
             result = autopost.gerar_textos_conteudo(frames, 'Agora misturamos a farinha.', self.trends)
         self.assertEqual(result['hashtags'], ['#Culinaria'])
+        self.assertEqual(result['japanese'], japanese)
         self.assertNotIn('DO_NOT_USE', repr(request.call_args_list))
         self.assertEqual(len(request.call_args_list[0].args[1]), 4)
+        japanese_evidence = request.call_args_list[2].args[1]
+        self.assertEqual(len(japanese_evidence), 4)
+        self.assertEqual(json.loads(japanese_evidence[0]['text'])['transcription'],
+                         'Agora misturamos a farinha.')
         invalid = {**copy, 'hashtags': ['#Inventada']}
-        with patch.object(autopost, '_content_json', side_effect=[story, invalid]):
-            with self.assertRaises(RuntimeError):
-                autopost.gerar_textos_conteudo(frames, '', self.trends)
+        with patch.object(autopost, '_content_json', side_effect=[story, invalid, japanese]):
+            fallback = autopost.gerar_textos_conteudo(frames, 'Agora misturamos a farinha.', self.trends)
+        self.assertEqual(fallback['mode'], 'simple')
+        self.assertNotIn('#Inventada', fallback['hashtags'])
+        self.assertEqual(fallback['japanese'], japanese)
+
+    def test_japanese_title_validation_accepts_any_well_formed_japanese_title(self):
+        valid = {'text': '日常', 'translation': 'cotidiano', 'reason': 'Resume o assunto do vídeo.'}
+        autopost.validar_titulo_japones(valid)
+        with self.assertRaisesRegex(RuntimeError, '2 a 4 caracteres'):
+            autopost.validar_titulo_japones({**valid, 'text': 'funny'})
+        with self.assertRaisesRegex(RuntimeError, 'repetiu'):
+            autopost.validar_titulo_japones(valid, ['日常'])
+
+    def test_japanese_title_swap_excludes_previous_titles_and_renders_new_one(self):
+        frames = []
+        for index in range(3):
+            path = Path(self.tmp.name) / f'frame-{index}.jpg'
+            path.write_bytes(b'frame')
+            frames.append(str(path))
+        current = {'text': '爆笑', 'translation': 'muito engraçado',
+                   'reason': 'A pessoa ri.'}
+        replacement = {'text': '驚愕', 'translation': 'surpresa',
+                       'reason': 'A expressão muda para espanto.'}
+        report = {
+            'content': {'summary': 'A pessoa ri e se espanta.', 'japanese': current},
+            'previous_japanese_titles': ['悲哀'],
+            'analysis_frames': frames,
+            'transcription': 'Não acredito!',
+        }
+        with patch.object(autopost, 'gerar_titulo_japones', return_value=replacement) as generate, \
+                patch.object(autopost, 'gravar_titulo_japones') as render:
+            autopost.trocar_titulo_japones(report)
+        generate.assert_called_once_with(
+            frames, 'Não acredito!', 'A pessoa ri e se espanta.', ['悲哀', '爆笑']
+        )
+        render.assert_called_once_with(report, replacement)
+        self.assertEqual(report['previous_japanese_titles'], ['悲哀', '爆笑'])
+        self.assertTrue(report['content']['japanese_required'])
 
     def test_expired_trends_rejected(self):
         path = Path(self.tmp.name) / 'trends.json'

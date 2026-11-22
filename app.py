@@ -845,6 +845,7 @@ def privacy():
                 "heading": "Dados utilizados",
                 "paragraphs": [
                     "O painel processa links e identificadores de pastas do Google Drive, metadados dos vídeos e os títulos e hashtags que você editar.",
+                    "Ao usar RODAR AUTOMÁTICO, o áudio é transcrito localmente com Whisper. Três frames e a transcrição são enviados ao OpenRouter para análise do conteúdo e geração dos títulos. O título japonês e sua versão em português são gravados no vídeo preparado para o agendamento.",
                     "Se você conectar TikTok ou YouTube, o painel recebe tokens de autorização para acessar os recursos necessários. Ao solicitar um envio ao TikTok, somente o vídeo é transferido como rascunho; título, hashtags e publicação são concluídos por você no TikTok. Para o YouTube, o vídeo, título e hashtags são enviados para criar um vídeo privado.",
                 ],
             },
@@ -1581,6 +1582,8 @@ def process_social_post_job(
             workdir=workdir,
         )
         prepared = autopost.prepared_media(content_report)
+        if content_report and content_report.get('content', {}).get('japanese_required') and not prepared:
+            raise RuntimeError('A versão com título japonês precisa estar pronta antes do envio.')
         improved = copy_completed_improvement(video_id, workdir) if quality_callback is None and content_report is None else None
         if prepared:
             upload_name = os.path.basename(prepared)
@@ -2447,10 +2450,17 @@ TITLE_EDITOR_SCRIPT = r"""
           if(video.thumbnail) { const img=document.createElement('img');
             img.src='__COVER_ENDPOINT__'.replace('SHA',video.sha256)+'?revision='+review.revision;
             img.alt='Capa: '+copy.title; card.append(img); }
-          for(const line of ['História detectada: '+copy.summary, 'Título: '+copy.title,
+          for(const line of ['História detectada: '+copy.summary,
+            'Título no vídeo: '+(copy.japanese ? copy.japanese.text+' ('+copy.japanese.translation+')' : 'Pendente'),
+            'Emoção escolhida: '+(copy.japanese?.reason || copy.japanese_error || ''), 'Título para postar: '+copy.title,
             'Legenda: '+copy.caption, 'Hashtags: '+(copy.hashtags||[]).join(' '),
             'Nota: '+video.score+'/10 — '+(video.reasons||[]).join('; ')]) {
             const p=document.createElement('p');p.textContent=line;card.append(p);
+          }
+          if(video.japanese_variant) {
+            const caption=document.createElement('p');caption.textContent='Prévia do título nos primeiros 2 segundos';card.append(caption);
+            const image=document.createElement('img');image.src='/agendamento/titulo-japones/'+video.sha256+'/'+video.japanese_variant;
+            image.alt='Título no vídeo: '+(copy.japanese?.text || '');image.style.width='360px';card.append(image);
           }
           const risk=video.risk || {checked:false, reasons:[]};
           const limitation=document.createElement('small');limitation.textContent=risk.limitation||'Triagem amostral; não comprova direitos autorais.';card.append(limitation);
@@ -2459,9 +2469,9 @@ TITLE_EDITOR_SCRIPT = r"""
           if(!risk.checked){const p=document.createElement('p');p.style.color='#ff8585';
             p.textContent='Verificação incompleta: '+(risk.warning||'aguardando triagem');card.append(p);}
           if(review.status==='draft') {
-            for(const [action,label] of [['approve','APROVAR'],['title','TROCAR TÍTULO'],['replace','TROCAR VÍDEO']]) {
+            for(const [action,label] of [['approve','APROVAR'],['title','TROCAR TÍTULO'],['japanese','TROCAR TÍTULO JAPONÊS'],['replace','TROCAR VÍDEO']]) {
               const b=document.createElement('button');b.type='button';b.textContent=label;b.style.margin='4px';
-              if(action==='approve') {b.disabled=!risk.checked || !!risk.reasons.length || review.state.approved.includes(video.id);
+              if(action==='approve') {b.disabled=!risk.checked || !!risk.reasons.length || (copy.japanese_required && (!copy.japanese || video.japanese_rendered!==copy.japanese.text)) || review.state.approved.includes(video.id);
                 if(review.state.approved.includes(video.id)) b.textContent='APROVADO';}
               b.onclick=()=>act(action,video,b);card.append(b);
             }
@@ -2484,7 +2494,8 @@ TITLE_EDITOR_SCRIPT = r"""
         const score = video.score_scale === 10 ? video.score : video.score / 10;
         const lines = [video.name + ' | Nota: ' + score.toFixed(1) + '/10 | ' + (video.selected ? 'ESCOLHIDO' : video.status),
           'História detectada: ' + (copy.summary || 'Análise ainda indisponível'),
-          'Título: ' + (copy.title || ''), 'Legenda: ' + (copy.caption || ''),
+          'Título no vídeo: ' + (copy.japanese ? copy.japanese.text+' ('+copy.japanese.translation+')' : (copy.japanese_error || 'Indisponível')),
+          'Título para postar: ' + (copy.title || ''), 'Legenda: ' + (copy.caption || ''),
           'Hashtags: ' + (copy.hashtags || []).join(' '), video.message,
           'Motivos: ' + (video.reasons || []).join('; ')];
         if (copy.uncertainty) lines.push('Limitações: ' + copy.uncertainty);
@@ -2673,6 +2684,9 @@ def revisar_previa():
                         raise ValueError('Mídia preparada indisponível. Troque o vídeo.')
                     if video['id'] not in state['approved']:
                         state['approved'].append(video['id'])
+                elif action == 'japanese':
+                    autopost.trocar_titulo_japones(video)
+                    state['approved'] = [v for v in state['approved'] if v != video['id']]
                 elif action == 'title':
                     copy = video['content']
                     previous = video.setdefault('previous_titles', [])
@@ -2706,7 +2720,7 @@ def revisar_previa():
                         if any(autopost.conteudo_repetido(item, other) for other in state['videos'] + fingerprints):
                             continue
                         try:
-                            autopost.exigir_video_seguro(item)
+                            autopost.exigir_video_seguro(item, require_render=False)
                         except RuntimeError:
                             continue
                         candidate = item
@@ -2763,6 +2777,17 @@ def automatic_warnings():
     if trends.get('warning'):
         warnings.append(trends['warning'])
     return warnings
+
+
+@app.route('/agendamento/titulo-japones/<sha256>/<variant>')
+def japanese_title_preview(sha256, variant):
+    if not session.get('csrf_token') or not all(re.fullmatch(r'[a-f0-9]{64}', v) for v in (sha256, variant)):
+        return '', 404
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'autopost_assets', sha256,
+                        'jp-' + variant, 'primeiro_frame.jpg')
+    if not os.path.isfile(path):
+        return '', 404
+    return send_file(path, mimetype='image/jpeg')
 
 
 @app.route('/agendamento/capa/<sha256>')

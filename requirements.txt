@@ -11,3 +11,4 @@ google-auth
 google-auth-oauthlib
 psycopg[binary]
 openai-whisper
+Pillow>=10.0,<13.0

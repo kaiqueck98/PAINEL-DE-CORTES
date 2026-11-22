@@ -42,6 +42,12 @@ Cada vídeo também pode ser baixado pelo painel ou marcado como postado. Os car
 
 Vídeos abaixo de 720p mostram **Melhorar qualidade**. O processamento usa FFmpeg local para ajustar o quadro a 1080×1920 sem cortar a imagem, aplicar nitidez e um leve aumento de brilho. O original no Drive não é alterado. Ao terminar, o player do cartão permite comparar **Ver original** e **Ver melhorado**; o arquivo melhorado precisa ser assistido do início ao fim para liberar **Baixar vídeo melhorado**. O resultado é gerado no servidor e baixado para o computador. É necessário ter `ffmpeg` disponível no `PATH` do servidor.
 
+## Rodar automático e título japonês
+
+Configure `DRIVE_API_KEY` e `OPENROUTER_API_KEY`, conecte YouTube e TikTok e instale `ffmpeg` e `ffprobe` no servidor. O botão **RODAR AUTOMÁTICO** transcreve o áudio localmente com Whisper e analisa três frames amostrados com a transcrição para preparar uma prévia. A transcrição e os três frames são enviados ao OpenRouter para gerar a história e os títulos.
+
+A prévia mostra um título japonês de 2 a 4 caracteres com tradução e motivo, além do título em português para publicar. **TROCAR TÍTULO JAPONÊS** solicita uma alternativa sem repetir as anteriores. Depois de gerar a versão com o título centralizado nos primeiros dois segundos, aprove os quatro vídeos para confirmar o agendamento. A mídia enviada é salva como `video_com_titulo.mp4`; a fonte Noto Sans CJK JP é baixada e armazenada em cache na primeira renderização. Se a fonte não puder ser obtida ou não suportar os caracteres, o vídeo não será aprovado nem enviado.
+
 ## Conectar TikTok e YouTube; enviar vídeos
 
 Se ainda não existir um `.env`, copie `.env.example` para criá-lo. Se já existir, preserve as configurações atuais e acrescente somente as novas variáveis; preencha as credenciais das duas plataformas. O painel gera uma chave Fernet válida para `SOCIAL_TOKEN_ENCRYPTION_KEY` quando necessário e a salva automaticamente no `.env`. Gere manualmente apenas um valor persistente para `FLASK_SECRET_KEY`:
