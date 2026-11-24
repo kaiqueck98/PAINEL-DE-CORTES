@@ -41,6 +41,84 @@ def _media_tools() -> tuple[str, str]:
     return ffmpeg, ffprobe
 
 
+def _watermark_font() -> str:
+    candidates = [
+        os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "Fonts", "arial.ttf"),
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+    ]
+    font = next((path for path in candidates if os.path.isfile(path)), None)
+    if not font:
+        raise RuntimeError("Não foi encontrada uma fonte para adicionar a marca do canal.")
+    return font
+
+
+def _escape_filter_path(path: str) -> str:
+    return (os.path.abspath(path).replace("\\", "/")
+            .replace(":", "\\:").replace("'", "\\'").replace(",", "\\,")
+            .replace("[", "\\[").replace("]", "\\]"))
+
+
+def limpar_metadados_e_adicionar_marca(
+    video: str | os.PathLike,
+    channel_name: str,
+    output_dir: str,
+    progress_callback=None,
+) -> str:
+    """Remove os metadados do arquivo e gera a cópia final com marca d'água."""
+    source = os.path.abspath(os.fspath(video))
+    name = channel_name.strip()
+    if not os.path.isfile(source):
+        raise RuntimeError("O vídeo precisa estar disponível antes da limpeza.")
+    if not name:
+        raise RuntimeError("Configure CANAL_NOME antes de publicar vídeos.")
+
+    ffmpeg, _ = _media_tools()
+    font = _watermark_font()
+    processing_dir = os.path.join(output_dir, "metadata_cleanup")
+    os.makedirs(processing_dir, exist_ok=True)
+    clean_path = os.path.join(processing_dir, "video_sem_metadados.mp4")
+    output_path = os.path.join(processing_dir, "video_pronto_para_postar.mp4")
+    text_path = os.path.join(processing_dir, "marca_canal.txt")
+    try:
+        Path(text_path).write_text(name, encoding="utf-8")
+        _media_command([
+            ffmpeg, "-hide_banner", "-nostdin", "-nostats", "-y", "-i", source,
+            "-map", "0:v:0", "-map", "0:a:0?", "-map_metadata", "-1",
+            "-map_chapters", "-1", "-c", "copy", clean_path,
+        ])
+        if not os.path.isfile(clean_path) or not os.path.getsize(clean_path):
+            raise RuntimeError("O FFmpeg não gerou o vídeo sem metadados.")
+
+        if progress_callback:
+            progress_callback()
+
+        drawtext = (
+            f"drawtext=fontfile='{_escape_filter_path(font)}':"
+            f"textfile='{_escape_filter_path(text_path)}':"
+            "fontcolor=white@0.5:fontsize=max(12\\,h/60):"
+            "x=w-tw-w*0.02:y=h-th-h*0.02"
+        )
+        _media_command([
+            ffmpeg, "-hide_banner", "-nostdin", "-nostats", "-y", "-i", clean_path,
+            "-map", "0:v:0", "-map", "0:a:0?", "-map_metadata", "-1",
+            "-map_chapters", "-1", "-vf", drawtext,
+            "-c:v", "libx264", "-preset", "fast", "-crf", "20",
+            "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k",
+            "-movflags", "+faststart", output_path,
+        ])
+        if not os.path.isfile(output_path) or not os.path.getsize(output_path):
+            raise RuntimeError("O FFmpeg não gerou o vídeo com a marca do canal.")
+        os.remove(source)
+        return output_path
+    finally:
+        for path in (clean_path, text_path):
+            try:
+                os.remove(path)
+            except FileNotFoundError:
+                pass
+
+
 def analisar_qualidade(video: str | os.PathLike) -> dict:
     """Heurística: 720p, >=1.5 Mbps, RMS >=-30 dBFS, blur <=5.
 

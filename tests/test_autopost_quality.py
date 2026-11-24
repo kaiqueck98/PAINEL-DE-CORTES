@@ -117,6 +117,26 @@ class MediaTests(unittest.TestCase):
         self.assertTrue(all(Path(p).is_file() and Path(p).stat().st_size > 0 for p in frames))
         self.assertTrue(all(len(value) == 16 for value in hashes))
 
+    def test_metadata_cleanup_watermarks_and_removes_source(self):
+        source = self.create_media('tagged.mp4')
+        autopost._media_command([
+            'ffmpeg', '-hide_banner', '-y', '-i', source, '-map_metadata', '-1',
+            '-metadata', 'title=original title', '-metadata:s:v:0',
+            'comment=stream tag', '-c', 'copy',
+            os.path.join(self.temp.name, 'tagged_with_metadata.mp4'),
+        ])
+        source_with_metadata = os.path.join(self.temp.name, 'tagged_with_metadata.mp4')
+        output = autopost.limpar_metadados_e_adicionar_marca(
+            source_with_metadata, 'Canal de teste', self.temp.name
+        )
+        self.assertTrue(Path(output).is_file())
+        self.assertFalse(Path(source_with_metadata).exists())
+        metadata = json.loads(autopost._media_command([
+            'ffprobe', '-v', 'error', '-show_format', '-show_streams', '-of', 'json', output,
+        ]).stdout)
+        self.assertNotIn('title', metadata.get('format', {}).get('tags', {}))
+        self.assertNotIn('comment', metadata['streams'][0].get('tags', {}))
+
 
 class PipelineTests(unittest.TestCase):
     def test_scheduled_upload_uses_improved_path_both_platforms(self):
@@ -131,12 +151,22 @@ class PipelineTests(unittest.TestCase):
                 social.upload_tiktok_inbox.return_value = ('remote', 'inbox')
                 social.publish_youtube.return_value = 'remote'
                 auto = Mock()
-                auto.analisar_qualidade.return_value = {'qualidade': 'RUIM', 'motivos': ['áudio baixo']}
+                auto.analisar_qualidade.return_value = {
+                    'qualidade': 'RUIM', 'motivos': ['áudio baixo'], 'duration': 60,
+                }
+                auto.video_bloqueado.return_value = False
+                auto.prepared_media.return_value = None
+                auto.extrair_frames.return_value = ([], [])
+                auto.verificar_riscos.return_value = {'checked': True}
                 output = os.path.join(directory, 'automatico', 'video_melhorado.mp4')
                 auto.melhorar_video.return_value = output
+                auto.limpar_metadados_e_adicionar_marca.side_effect = (
+                    lambda *args, **kwargs: (kwargs['progress_callback'](), output)[1]
+                )
                 callback = Mock()
                 ns = dict(os=os, tempfile=types.SimpleNamespace(mkdtemp=lambda **kw: directory),
                           subprocess=subprocess, social_publishing=social, autopost=auto,
+                          CANAL_NOME='Canal de teste',
                           SocialPostsError=type('SocialPostsError', (Exception,), {}),
                           PostedVideosError=type('PostedVideosError', (Exception,), {}),
                           app=Mock())
@@ -145,12 +175,31 @@ class PipelineTests(unittest.TestCase):
                              'record_social_post', 'mark_video_posted', 'remove_improvement_files'):
                     ns[name] = Mock()
                 exec(compile(ast.Module(body=[node], type_ignores=[]), '<worker>', 'exec'), ns)
-                ns['process_social_post_job']('job', platform, 'video', 'original.mp4', 'Título editado', '#ciencia', 'mock-key', quality_callback=callback)
+                ns['process_social_post_job'](
+                    'job', platform, 'video', 'original.mp4', 'Título editado',
+                    '#ciencia', 'mock-key', quality_callback=callback,
+                    video_number=1, video_total=4,
+                )
                 uploader = social.publish_youtube if platform == 'youtube' else social.upload_tiktok_inbox
                 self.assertEqual(uploader.call_args.args[0], output)
                 if platform == 'youtube':
                     self.assertEqual(uploader.call_args.args[1], 'Título editado')
-                self.assertEqual([c.args[0] for c in callback.call_args_list], ['analisando', 'melhorando', 'enviando'])
+                self.assertIn('Limpando metadados do vídeo 1 de 4...', [c.args[1] for c in callback.call_args_list])
+                self.assertIn('Postando...', [c.args[1] for c in callback.call_args_list])
+                if platform == 'youtube':
+                    social.publish_youtube.reset_mock()
+                    callback.reset_mock()
+                    auto.limpar_metadados_e_adicionar_marca.side_effect = RuntimeError('FFmpeg falhou')
+                    ns['process_social_post_job'](
+                        'job-falhou', platform, 'video', 'original.mp4',
+                        'Título editado', '#ciencia', 'mock-key',
+                        quality_callback=callback,
+                        video_number=1, video_total=4,
+                    )
+                    social.publish_youtube.assert_not_called()
+                    callback.assert_any_call(
+                        'falhou', 'Falha ao limpar metadados do vídeo 1, pulando'
+                    )
 
 
 class ScreenTests(StoreTests):

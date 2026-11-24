@@ -23,6 +23,7 @@ from apscheduler.triggers.cron import CronTrigger
 from dotenv import load_dotenv
 DOTENV_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
 load_dotenv(dotenv_path=DOTENV_FILE)
+CANAL_NOME = os.environ.get("CANAL_NOME", "").strip()
 SOCIAL_TOKEN_ENCRYPTION_KEY_CONFIGURED = bool(
     os.environ.get("SOCIAL_TOKEN_ENCRYPTION_KEY", "").strip()
 )
@@ -1707,6 +1708,8 @@ def process_social_post_job(
     api_key,
     quality_callback=None,
     content_report=None,
+    video_number=1,
+    video_total=1,
 ):
     workdir = None
     published = False
@@ -1806,6 +1809,39 @@ def process_social_post_job(
                 asset_messages.append('Primeiro frame melhorado na cópia enviada; a seleção da capa no rascunho depende do TikTok.')
 
         autopost.exigir_video_seguro(safety_report)
+        if not CANAL_NOME:
+            raise RuntimeError("Configure CANAL_NOME no .env antes de publicar vídeos.")
+        cleanup_message = f"Limpando metadados do vídeo {video_number} de {video_total}..."
+        update_social_post_job(job_id, status="processing", progress=42, message=cleanup_message)
+        if quality_callback is not None:
+            quality_callback("limpando", cleanup_message)
+
+        def watermark_progress():
+            message = "Adicionando marca do canal..."
+            update_social_post_job(job_id, status="processing", progress=46, message=message)
+            if quality_callback is not None:
+                quality_callback("marca", message)
+
+        try:
+            video_path = autopost.limpar_metadados_e_adicionar_marca(
+                video_path,
+                CANAL_NOME,
+                workdir,
+                progress_callback=watermark_progress,
+            )
+        except (OSError, RuntimeError, ValueError, MemoryError, subprocess.SubprocessError) as exc:
+            app.logger.exception("Falha ao limpar metadados do vídeo %s.", video_number)
+            failure_message = (
+                f"Falha ao limpar metadados do vídeo {video_number}, pulando"
+            )
+            update_social_post_job(job_id, status="error", progress=0, message=failure_message)
+            if quality_callback is not None:
+                quality_callback("falhou", failure_message)
+            raise RuntimeError(failure_message) from exc
+
+        update_social_post_job(job_id, status="processing", progress=50, message="Postando...")
+        if quality_callback is not None:
+            quality_callback("enviando", "Postando...")
         token = social_publishing.get_access_token(platform)
 
         def progress_callback(status, progress, message):
@@ -2166,6 +2202,8 @@ def process_scheduled_social_post(job_id, item, filename, title, hashtags, api_k
             api_key,
             quality_callback=quality_progress,
             content_report=item.get('content_report'),
+            video_number=item.get("video_number", 1),
+            video_total=item.get("video_total", 1),
         )
     except (
         OSError,
@@ -2350,8 +2388,11 @@ def run_schedule_slot(schedule_id, slot_time):
             load_social_posts(),
             now_text,
         )
+        video_number = schedule["times"].index(slot_time) + 1
         for item in reserved:
             item["content_report"] = next(v for v in candidates if v["id"] == item["video_id"])
+            item["video_number"] = video_number
+            item["video_total"] = schedule["videos_per_day"]
             start_scheduled_social_post(item, api_key)
     except (
         RuntimeError,

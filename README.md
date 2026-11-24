@@ -50,6 +50,8 @@ Em produção, configure `DATABASE_URL` com a conexão PostgreSQL do Supabase pa
 
 Configure `DRIVE_API_KEY` e `OPENROUTER_API_KEY`, conecte YouTube e TikTok e instale `ffmpeg` e `ffprobe` no servidor. O botão **RODAR AUTOMÁTICO** transcreve o áudio localmente com Whisper e analisa três frames amostrados com a transcrição para preparar uma prévia. A transcrição e os três frames são enviados ao OpenRouter para gerar a história e os títulos.
 
+Antes de cada envio, inclusive os agendados, o servidor remove os metadados do arquivo com FFmpeg e adiciona uma marca d'água pequena, branca e semitransparente no canto inferior direito. Defina `CANAL_NOME` no `.env` com o nome do canal e mantenha FFmpeg e uma fonte TrueType instalados no servidor. Se a limpeza ou a marca d'água falhar, o vídeo não será enviado; o original local temporário é removido após o processamento bem-sucedido.
+
 A prévia mostra um título japonês de 2 a 4 caracteres com tradução e motivo, além do título em português para publicar. **TROCAR TÍTULO JAPONÊS** solicita uma alternativa sem repetir as anteriores. Depois de gerar a versão com o título centralizado nos primeiros dois segundos, aprove os quatro vídeos para confirmar o agendamento. A mídia enviada é salva como `video_com_titulo.mp4`; a fonte Noto Sans CJK JP é baixada e armazenada em cache na primeira renderização. Se a fonte não puder ser obtida ou não suportar os caracteres, o vídeo não será aprovado nem enviado.
 
 ## Conectar TikTok e YouTube; enviar vídeos
