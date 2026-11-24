@@ -127,7 +127,7 @@ class MediaTests(unittest.TestCase):
         ])
         source_with_metadata = os.path.join(self.temp.name, 'tagged_with_metadata.mp4')
         output = autopost.limpar_metadados_e_adicionar_marca(
-            source_with_metadata, 'Canal de teste', self.temp.name
+            source_with_metadata, '@diverso_clips', self.temp.name
         )
         self.assertTrue(Path(output).is_file())
         self.assertFalse(Path(source_with_metadata).exists())
@@ -166,7 +166,7 @@ class PipelineTests(unittest.TestCase):
                 callback = Mock()
                 ns = dict(os=os, tempfile=types.SimpleNamespace(mkdtemp=lambda **kw: directory),
                           subprocess=subprocess, social_publishing=social, autopost=auto,
-                          CANAL_NOME='Canal de teste',
+                          CANAL_NOME='@diverso_clips',
                           SocialPostsError=type('SocialPostsError', (Exception,), {}),
                           PostedVideosError=type('PostedVideosError', (Exception,), {}),
                           app=Mock())
@@ -185,6 +185,7 @@ class PipelineTests(unittest.TestCase):
                 if platform == 'youtube':
                     self.assertEqual(uploader.call_args.args[1], 'Título editado')
                 self.assertIn('Limpando metadados do vídeo 1 de 4...', [c.args[1] for c in callback.call_args_list])
+                self.assertIn('Adicionando @diverso_clips...', [c.args[1] for c in callback.call_args_list])
                 self.assertIn('Postando...', [c.args[1] for c in callback.call_args_list])
                 if platform == 'youtube':
                     social.publish_youtube.reset_mock()
@@ -198,7 +199,7 @@ class PipelineTests(unittest.TestCase):
                     )
                     social.publish_youtube.assert_not_called()
                     callback.assert_any_call(
-                        'falhou', 'Falha ao limpar metadados do vídeo 1, pulando'
+                        'falhou', 'Falha ao limpar metadados, pulando'
                     )
 
 

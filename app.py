@@ -1817,7 +1817,7 @@ def process_social_post_job(
             quality_callback("limpando", cleanup_message)
 
         def watermark_progress():
-            message = "Adicionando marca do canal..."
+            message = f"Adicionando {CANAL_NOME}..."
             update_social_post_job(job_id, status="processing", progress=46, message=message)
             if quality_callback is not None:
                 quality_callback("marca", message)
@@ -1831,9 +1831,7 @@ def process_social_post_job(
             )
         except (OSError, RuntimeError, ValueError, MemoryError, subprocess.SubprocessError) as exc:
             app.logger.exception("Falha ao limpar metadados do vídeo %s.", video_number)
-            failure_message = (
-                f"Falha ao limpar metadados do vídeo {video_number}, pulando"
-            )
+            failure_message = "Falha ao limpar metadados, pulando"
             update_social_post_job(job_id, status="error", progress=0, message=failure_message)
             if quality_callback is not None:
                 quality_callback("falhou", failure_message)
