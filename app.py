@@ -1817,7 +1817,10 @@ def process_social_post_job(
             quality_callback("limpando", cleanup_message)
 
         def watermark_progress():
-            message = f"Adicionando {CANAL_NOME}..."
+            message = (
+                f"Adicionando {CANAL_NOME} no canto inferior esquerdo "
+                f"do vídeo {video_number} de {video_total}..."
+            )
             update_social_post_job(job_id, status="processing", progress=46, message=message)
             if quality_callback is not None:
                 quality_callback("marca", message)

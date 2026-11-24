@@ -126,9 +126,22 @@ class MediaTests(unittest.TestCase):
             os.path.join(self.temp.name, 'tagged_with_metadata.mp4'),
         ])
         source_with_metadata = os.path.join(self.temp.name, 'tagged_with_metadata.mp4')
-        output = autopost.limpar_metadados_e_adicionar_marca(
-            source_with_metadata, '@diverso_clips', self.temp.name
-        )
+        media_command = autopost._media_command
+        with patch.object(autopost, '_media_command', wraps=media_command) as command:
+            output = autopost.limpar_metadados_e_adicionar_marca(
+                source_with_metadata, '@diverso_clips', self.temp.name
+            )
+        remux_args = command.call_args_list[0].args[0]
+        watermark_args = command.call_args_list[1].args[0]
+        self.assertIn('-map_metadata', remux_args)
+        self.assertIn('-c', remux_args)
+        self.assertEqual(remux_args[remux_args.index('-c') + 1], 'copy')
+        drawtext = watermark_args[watermark_args.index('-vf') + 1]
+        self.assertIn('fontcolor=white@0.6', drawtext)
+        self.assertIn('fontsize=h/28', drawtext)
+        self.assertIn('x=20:y=h-th-30', drawtext)
+        self.assertIn('shadowcolor=black@0.35', drawtext)
+        self.assertNotIn('enable=', drawtext)
         self.assertTrue(Path(output).is_file())
         self.assertFalse(Path(source_with_metadata).exists())
         metadata = json.loads(autopost._media_command([
@@ -185,7 +198,10 @@ class PipelineTests(unittest.TestCase):
                 if platform == 'youtube':
                     self.assertEqual(uploader.call_args.args[1], 'Título editado')
                 self.assertIn('Limpando metadados do vídeo 1 de 4...', [c.args[1] for c in callback.call_args_list])
-                self.assertIn('Adicionando @diverso_clips...', [c.args[1] for c in callback.call_args_list])
+                self.assertIn(
+                    'Adicionando @diverso_clips no canto inferior esquerdo do vídeo 1 de 4...',
+                    [c.args[1] for c in callback.call_args_list],
+                )
                 self.assertIn('Postando...', [c.args[1] for c in callback.call_args_list])
                 if platform == 'youtube':
                     social.publish_youtube.reset_mock()

@@ -41,16 +41,15 @@ def _media_tools() -> tuple[str, str]:
     return ffmpeg, ffprobe
 
 
-def _watermark_font() -> str:
+def _watermark_font() -> str | None:
     candidates = [
+        os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "Fonts", "DejaVuSans-Bold.ttf"),
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
         os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "Fonts", "arial.ttf"),
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
     ]
-    font = next((path for path in candidates if os.path.isfile(path)), None)
-    if not font:
-        raise RuntimeError("Não foi encontrada uma fonte para adicionar a marca do canal.")
-    return font
+    return next((path for path in candidates if os.path.isfile(path)), None)
 
 
 def _escape_filter_path(path: str) -> str:
@@ -93,11 +92,12 @@ def limpar_metadados_e_adicionar_marca(
         if progress_callback:
             progress_callback()
 
+        font_option = f"fontfile='{_escape_filter_path(font)}':" if font else ""
         drawtext = (
-            f"drawtext=fontfile='{_escape_filter_path(font)}':"
+            f"drawtext={font_option}"
             f"textfile='{_escape_filter_path(text_path)}':"
-            "fontcolor=white@0.5:fontsize=max(12\\,h/60):"
-            "x=w-tw-w*0.02:y=h-th-h*0.02"
+            "fontcolor=white@0.6:fontsize=h/28:"
+            "x=20:y=h-th-30:shadowcolor=black@0.35:shadowx=1:shadowy=1"
         )
         _media_command([
             ffmpeg, "-hide_banner", "-nostdin", "-nostats", "-y", "-i", clean_path,
