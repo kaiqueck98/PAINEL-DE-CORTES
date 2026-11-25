@@ -259,6 +259,122 @@ class PipelineTests(unittest.TestCase):
 
 
 class ScreenTests(StoreTests):
+    def test_home_shows_only_connections_and_folder_form_until_drive_loads(self):
+        from flask import Flask, render_template, request
+
+        tree = ast.parse((ROOT / "app.py").read_text(encoding="utf-8-sig"))
+        index_node = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == "index"
+        )
+        index_node.decorator_list = []
+        folder_link = "https://drive.google.com/drive/folders/folder"
+        load_link = Mock(return_value="")
+        save_link = Mock()
+        folder_view = {
+            "folder_name": "Clipes",
+            "video_count": 4,
+            "videos": [],
+            "folders": [{"id": "subfolder", "name": "50 MIL cortes virais", "video_count": 4}],
+            "warnings": [],
+        }
+        get_folder_view = Mock(return_value=folder_view)
+        namespace = {
+            "request": request,
+            "render_template": render_template,
+            "load_drive_folder_link": load_link,
+            "save_drive_folder_link": save_link,
+            "extract_folder_id": lambda value: "folder",
+            "parse_folder_path": lambda value: value.split(","),
+            "get_folder_view": get_folder_view,
+            "load_good_video_ids": Mock(return_value=set()),
+            "load_posted_video_ids": Mock(return_value=set()),
+            "load_social_posts": Mock(return_value={}),
+            "load_folder_models": Mock(return_value={}),
+            "AUTPOST_STORE": Mock(),
+            "video_quality": Mock(),
+            "video_duration_milliseconds": Mock(),
+            "score_video": Mock(),
+            "apply_folder_model": Mock(),
+            "gerar_titulo": Mock(),
+            "os": os,
+            "re": re,
+            "DriveError": type("DriveError", (Exception,), {}),
+            "GoodVideosError": type("GoodVideosError", (Exception,), {}),
+            "FolderModelsError": type("FolderModelsError", (Exception,), {}),
+            "PostedVideosError": type("PostedVideosError", (Exception,), {}),
+            "SocialPostsError": type("SocialPostsError", (Exception,), {}),
+            "AutomationSettingsError": type("AutomationSettingsError", (Exception,), {}),
+        }
+        exec(
+            compile(ast.Module(body=[index_node], type_ignores=[]), "<home-route>", "exec"),
+            namespace,
+        )
+        web = Flask("isolated_home_test", template_folder=str(ROOT / "templates"))
+        web.secret_key = "isolated-test-only"
+        web.testing = True
+        web.jinja_env.filters["duration"] = lambda value: ""
+        web.context_processor(
+            lambda: {
+                "csrf_token": "test-token",
+                "tiktok_connected": True,
+                "youtube_connected": True,
+                "social_token_error": None,
+            }
+        )
+        web.add_url_rule("/", endpoint="index", view_func=namespace["index"], methods=["GET", "POST"])
+        web.add_url_rule("/agendamento", endpoint="agendamento_page", view_func=lambda: "")
+        web.add_url_rule("/oauth/<platform>", endpoint="start_social_oauth", view_func=lambda platform: "")
+        web.add_url_rule(
+            "/disconnect/<platform>",
+            endpoint="disconnect_social",
+            view_func=lambda platform: "",
+            methods=["POST"],
+        )
+        web.add_url_rule("/privacy", endpoint="privacy", view_func=lambda: "")
+        web.add_url_rule("/terms", endpoint="terms", view_func=lambda: "")
+        client = web.test_client()
+
+        with patch.dict(os.environ, {"DRIVE_API_KEY": "test-key"}):
+            response = client.get("/")
+            self.assertEqual(response.status_code, 200)
+            page = response.get_data(as_text=True)
+            self.assertIn("<h1>Painel de Cortes Prontos</h1>", page)
+            self.assertIn("TikTok conectado", page)
+            self.assertIn("YouTube conectado", page)
+            self.assertIn("Desconectar", page)
+            self.assertNotIn("O vídeo será enviado como rascunho", page)
+            self.assertIn("Link da pasta do Google Drive", page)
+            self.assertIn("Listar pastas", page)
+            self.assertIn("A pasta precisa estar acessível", page)
+            self.assertNotIn("Organize seus vídeos", page)
+            self.assertNotIn("Agendamento Automático", page)
+            self.assertNotIn("50 MIL cortes virais", page)
+            self.assertNotIn('class="content-panel"', page)
+            self.assertNotIn("Informações legais", page)
+
+            get_folder_view.side_effect = namespace["DriveError"]("Drive indisponível")
+            response = client.post("/", data={"folder_link": folder_link})
+            self.assertEqual(response.status_code, 200)
+            self.assertNotIn("Agendamento Automático", response.get_data(as_text=True))
+            save_link.assert_not_called()
+
+            get_folder_view.side_effect = None
+            response = client.post("/", data={"folder_link": folder_link})
+            self.assertEqual(response.status_code, 200)
+            page = response.get_data(as_text=True)
+            self.assertIn("50 MIL cortes virais", page)
+            self.assertIn("Agendamento Automático", page)
+            save_link.assert_called_once_with(folder_link)
+
+            load_link.return_value = folder_link
+            response = client.get("/")
+            self.assertEqual(response.status_code, 200)
+            page = response.get_data(as_text=True)
+            self.assertIn("50 MIL cortes virais", page)
+            self.assertIn("Agendamento Automático", page)
+
     def test_processed_preview_route_serves_only_the_prepared_report_media(self):
         from flask import Flask, request, send_file, session
 

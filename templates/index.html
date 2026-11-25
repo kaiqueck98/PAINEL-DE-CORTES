@@ -123,12 +123,16 @@
 </head>
 <body>
   <main>
-    <span class="eyebrow">Organize seus vídeos</span>
-    <h1>Painel de Cortes Prontos</h1>
-    <p class="intro">Cole o link de uma pasta do Google Drive para navegar pelas pastas e encontrar seus vídeos.</p>
+    {% if folder_loaded %}
+      <span class="eyebrow">Organize seus vídeos</span>
+      <h1>Painel de Cortes Prontos</h1>
+      <p class="intro">Cole o link de uma pasta do Google Drive para navegar pelas pastas e encontrar seus vídeos.</p>
 
-    <!-- BOTAO AGENDAMENTO - JA COLOCADO PRA VOCE -->
-    <a href="/agendamento" style="display:block;margin-top:20px;padding:16px;border-radius:14px;background:#7c3aed;color:#fff;font-weight:700;text-align:center;text-decoration:none;font-size:1rem">📅 Agendamento Automático - 4 vídeos por dia - 08:00, 12:30, 18:00, 21:00 - Clique aqui</a>
+      <!-- BOTAO AGENDAMENTO - JA COLOCADO PRA VOCE -->
+      <a href="/agendamento" style="display:block;margin-top:20px;padding:16px;border-radius:14px;background:#7c3aed;color:#fff;font-weight:700;text-align:center;text-decoration:none;font-size:1rem">📅 Agendamento Automático - 4 vídeos por dia - 08:00, 12:30, 18:00, 21:00 - Clique aqui</a>
+    {% else %}
+      <h1>Painel de Cortes Prontos</h1>
+    {% endif %}
 
     <nav class="social-connections" aria-label="Conectar redes sociais">
       <div class="connection-group">
@@ -154,16 +158,18 @@
         {% endif %}
       </div>
     </nav>
-    {% if social_token_error %}
-      <div class="message" role="status">{{ social_token_error }}</div>
-    {% endif %}
-    {% for category, message in get_flashed_messages(with_categories=true) %}
-      <div class="message {% if category == 'success' %}success-message{% endif %}" role="status">{{ message }}</div>
-    {% endfor %}
-    {% if tiktok_connected %}
-      <section class="social-publishing-options" aria-label="Envio de rascunhos ao TikTok">
-        <p>O vídeo será enviado como rascunho para a caixa de entrada do TikTok. Abra a notificação no TikTok para adicionar texto, editar e publicar.</p>
-      </section>
+    {% if folder_loaded %}
+      {% if social_token_error %}
+        <div class="message" role="status">{{ social_token_error }}</div>
+      {% endif %}
+      {% for category, message in get_flashed_messages(with_categories=true) %}
+        <div class="message {% if category == 'success' %}success-message{% endif %}" role="status">{{ message }}</div>
+      {% endfor %}
+      {% if tiktok_connected %}
+        <section class="social-publishing-options" aria-label="Envio de rascunhos ao TikTok">
+          <p>O vídeo será enviado como rascunho para a caixa de entrada do TikTok. Abra a notificação no TikTok para adicionar texto, editar e publicar.</p>
+        </section>
+      {% endif %}
     {% endif %}
 
     <form method="post">
@@ -378,10 +384,12 @@
       </section>
     {% endif %}
   </main>
-  <footer class="legal-links" aria-label="Informações legais">
-    <a href="{{ url_for('privacy') }}">Política de Privacidade</a>
-    <a href="{{ url_for('terms') }}">Termos de Uso</a>
-  </footer>
+  {% if folder_loaded %}
+    <footer class="legal-links" aria-label="Informações legais">
+      <a href="{{ url_for('privacy') }}">Política de Privacidade</a>
+      <a href="{{ url_for('terms') }}">Termos de Uso</a>
+    </footer>
+  {% endif %}
   <script>
     document.addEventListener("click", async (event) => {
       const titleOption = event.target.closest("[data-title-option]");

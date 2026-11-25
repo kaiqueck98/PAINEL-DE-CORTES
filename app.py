@@ -935,6 +935,8 @@ def index():
     view = None
     error = None
     folder_link = ""
+    folder_loaded = False
+    submitted_folder_link = False
     path_ids = []
     sort_order = ""
     good_filter = "all"
@@ -951,6 +953,7 @@ def index():
         good_filter = request.form.get("good_filter", "all")
         posted_filter = request.form.get("posted_filter", "all")
         try:
+            folder_link = load_drive_folder_link()
             path_ids = parse_folder_path(request.form.get("path", ""))
             if action == "mark_good":
                 video_id = request.form.get("video_id", "")
@@ -969,12 +972,19 @@ def index():
                     request.form.get("hashtags_template", ""),
                 )
             return redirect_to_folder(path_ids, sort_order, good_filter, posted_filter)
-        except (ValueError, GoodVideosError, FolderModelsError, PostedVideosError) as exc:
+        except (
+            ValueError,
+            AutomationSettingsError,
+            GoodVideosError,
+            FolderModelsError,
+            PostedVideosError,
+        ) as exc:
             error = str(exc)
             if path_ids:
                 folder_link = f"https://drive.google.com/drive/folders/{path_ids[0]}"
     elif request.method == "POST":
         folder_link = request.form.get("folder_link", "").strip()
+        submitted_folder_link = True
         try:
             if not folder_link:
                 raise ValueError("Cole o link da pasta do Google Drive.")
@@ -993,8 +1003,19 @@ def index():
         if posted_filter not in {"all", "pending", "posted"}:
             posted_filter = "all"
         try:
-            path_ids = parse_folder_path(request.args["path"])
+            folder_link = load_drive_folder_link()
+            if folder_link:
+                path_ids = parse_folder_path(request.args["path"])
+        except AutomationSettingsError as exc:
+            error = str(exc)
         except ValueError as exc:
+            error = str(exc)
+    else:
+        try:
+            folder_link = load_drive_folder_link()
+            if folder_link:
+                path_ids = [extract_folder_id(folder_link)]
+        except (AutomationSettingsError, ValueError) as exc:
             error = str(exc)
 
     if path_ids:
@@ -1057,8 +1078,12 @@ def index():
             else:
                 videos = sorted(videos, key=lambda video: video["posted"])
             view["videos"] = videos
+            if submitted_folder_link:
+                save_drive_folder_link(folder_link)
+            folder_loaded = True
         except (
             DriveError,
+            AutomationSettingsError,
             GoodVideosError,
             FolderModelsError,
             PostedVideosError,
@@ -1079,6 +1104,7 @@ def index():
         folder_model=folder_model,
         error=error,
         folder_link=folder_link,
+        folder_loaded=folder_loaded,
     )
 
 
