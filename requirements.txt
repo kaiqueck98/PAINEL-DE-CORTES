@@ -6,6 +6,7 @@ psycopg2-binary>=2.9,<3.0
 cryptography>=41.0,<47.0
 pytz>=2024.1,<2027.0
 python-dotenv>=1.0,<2.0
+requests>=2.31,<3.0
 google-api-python-client
 google-auth
 google-auth-oauthlib

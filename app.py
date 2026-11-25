@@ -18,6 +18,7 @@ from urllib.parse import parse_qs, quote, urlencode, urlparse
 from urllib.request import Request, urlopen
 
 import pytz
+import requests
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from dotenv import load_dotenv
@@ -1548,110 +1549,184 @@ def download_video_sample_for_analysis(video, api_key, destination, progress_cal
         raise autopost.VideoDownloadError(
             "O Drive não informou uma duração válida para este vídeo."
         )
-    ffmpeg, _ = autopost._media_tools()
-    params = urlencode({"alt": "media", "key": api_key})
-    url = f"{DRIVE_API_BASE}/files/{quote(video['id'], safe='')}?{params}"
-    command = [
-        ffmpeg,
-        "-y",
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-nostdin",
-        "-rw_timeout",
-        "30000000",
-        "-threads",
-        "1",
-        "-i",
-        url,
-        "-t",
-        "20",
-        "-threads",
-        "1",
-        "-map",
-        "0:v:0",
-        "-map",
-        "0:a:0?",
-        "-vf",
-        "scale=640:640:force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2",
-        "-c:v",
-        "libx264",
-        "-preset",
-        "ultrafast",
-        "-threads",
-        "1",
-        "-crf",
-        "30",
-        "-c:a",
-        "aac",
-        "-ac",
-        "1",
-        "-ar",
-        "16000",
-        "-b:a",
-        "48k",
-        "-progress",
-        "pipe:1",
-        "-nostats",
-        "-movflags",
-        "+faststart",
-        destination,
-    ]
+
+    sample_limit = 5 * 1024 * 1024
     try:
-        with tempfile.TemporaryFile() as error_output:
-            process = subprocess.Popen(
-                command,
-                stdout=subprocess.PIPE,
-                stderr=error_output,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                bufsize=1,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-            )
-            if process.stdout is None:
-                raise autopost.VideoDownloadError(
-                    "Não foi possível acompanhar a extração do trecho."
-                )
-            for line in process.stdout:
-                if line.startswith("out_time_ms="):
-                    try:
-                        seconds = int(line.partition("=")[2]) / 1_000_000
-                    except ValueError:
-                        continue
-                    progress_callback(min(1.0, seconds / 20))
-            return_code = process.wait(timeout=120)
-            error_output.seek(0)
-            details = error_output.read().decode("utf-8", errors="replace")
-    except subprocess.TimeoutExpired as exc:
-        process.kill()
-        process.wait()
-        raise autopost.VideoDownloadError(
-            "O Drive demorou demais para fornecer o trecho do vídeo."
-        ) from exc
-    except OSError as exc:
-        raise autopost.VideoDownloadError(
-            f"Não foi possível baixar o trecho curto do Drive: {exc}"
-        ) from exc
-    details = details.replace(api_key, "[redacted]")
-    details = details.replace(quote(api_key, safe=""), "[redacted]")[-1200:].strip()
-    if return_code:
-        if any(
-            marker in details.casefold()
-            for marker in ("out of memory", "cannot allocate memory", "memory allocation")
-        ):
-            raise MemoryError("FFmpeg ficou sem memória ao gerar o trecho.")
-        if return_code == -9:
-            raise MemoryError("FFmpeg foi encerrado pelo limite de memória.")
-        message = "Não foi possível baixar o trecho curto do Drive."
-        if details:
-            message += " " + details
-        raise autopost.VideoDownloadError(message)
-    if not os.path.isfile(destination) or not os.path.getsize(destination):
-        raise autopost.VideoDownloadError(
-            "O Drive não retornou um trecho de vídeo analisável."
+        expected_bytes = min(
+            max(int(video.get("size", 0) or 0), 0) or sample_limit,
+            sample_limit,
         )
-    progress_callback(1.0)
+    except (TypeError, ValueError):
+        expected_bytes = sample_limit
+
+    temporary_source = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            prefix="drive-analysis-", suffix=".mp4",
+            dir=tempfile.gettempdir(), delete=False,
+        ) as temporary_file:
+            temporary_source = temporary_file.name
+
+        url = (
+            f"{DRIVE_API_BASE}/files/"
+            f"{quote(video['id'], safe='')}"
+        )
+        try:
+            response = requests.get(
+                url,
+                params={"alt": "media", "key": api_key},
+                headers={"Range": f"bytes=0-{sample_limit - 1}"},
+                stream=True,
+                timeout=(10, 60),
+            )
+        except requests.RequestException as exc:
+            raise autopost.VideoDownloadError(
+                "Não foi possível conectar ao Google Drive para baixar o trecho."
+            ) from exc
+
+        try:
+            with response:
+                try:
+                    response.raise_for_status()
+                except requests.HTTPError as exc:
+                    try:
+                        details = response.json()
+                        message = details.get("error", {}).get(
+                            "message", "Falha ao baixar vídeo do Google Drive."
+                        )
+                    except (ValueError, AttributeError):
+                        message = "Falha ao baixar vídeo do Google Drive."
+                    message = str(message).replace(api_key, "[redacted]")
+                    raise autopost.VideoDownloadError(message) from exc
+
+                downloaded = 0
+                with open(temporary_source, "wb") as source_file:
+                    for chunk in response.iter_content(chunk_size=1024 * 1024):
+                        if not chunk:
+                            continue
+                        chunk = chunk[:sample_limit - downloaded]
+                        source_file.write(chunk)
+                        downloaded += len(chunk)
+                        progress_callback(
+                            0.5 * min(downloaded / expected_bytes, 1.0)
+                        )
+                        if downloaded >= sample_limit:
+                            break
+        except requests.RequestException as exc:
+            raise autopost.VideoDownloadError(
+                "A conexão com o Google Drive foi interrompida durante o download."
+            ) from exc
+
+        if not downloaded:
+            raise autopost.VideoDownloadError(
+                "O Drive não retornou um trecho de vídeo analisável."
+            )
+
+        ffmpeg, _ = autopost._media_tools()
+        command = [
+            ffmpeg,
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-nostdin",
+            "-threads",
+            "1",
+            "-i",
+            temporary_source,
+            "-t",
+            "20",
+            "-threads",
+            "1",
+            "-map",
+            "0:v:0",
+            "-map",
+            "0:a:0?",
+            "-vf",
+            "scale=640:640:force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-threads",
+            "1",
+            "-crf",
+            "30",
+            "-c:a",
+            "aac",
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            "-b:a",
+            "48k",
+            "-progress",
+            "pipe:1",
+            "-nostats",
+            "-movflags",
+            "+faststart",
+            destination,
+        ]
+        try:
+            with tempfile.TemporaryFile() as error_output:
+                process = subprocess.Popen(
+                    command,
+                    stdout=subprocess.PIPE,
+                    stderr=error_output,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    bufsize=1,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+                if process.stdout is None:
+                    raise autopost.VideoDownloadError(
+                        "Não foi possível acompanhar a extração do trecho."
+                    )
+                for line in process.stdout:
+                    if line.startswith("out_time_ms="):
+                        try:
+                            seconds = int(line.partition("=")[2]) / 1_000_000
+                        except ValueError:
+                            continue
+                        progress_callback(
+                            0.5 + 0.5 * min(1.0, seconds / 20)
+                        )
+                return_code = process.wait(timeout=120)
+                error_output.seek(0)
+                details = error_output.read().decode("utf-8", errors="replace")
+        except subprocess.TimeoutExpired as exc:
+            process.kill()
+            process.wait()
+            raise autopost.VideoDownloadError(
+                "O Drive demorou demais para fornecer o trecho do vídeo."
+            ) from exc
+        except OSError as exc:
+            raise autopost.VideoDownloadError(
+                f"Não foi possível processar o trecho local do Drive: {exc}"
+            ) from exc
+
+        if return_code:
+            if any(
+                marker in details.casefold()
+                for marker in ("out of memory", "cannot allocate memory", "memory allocation")
+            ):
+                raise MemoryError("FFmpeg ficou sem memória ao gerar o trecho.")
+            if return_code == -9:
+                raise MemoryError("FFmpeg foi encerrado pelo limite de memória.")
+            details = details.replace(api_key, "[redacted]")[-1200:].strip()
+            message = "Não foi possível processar o trecho local do Drive."
+            if details:
+                message += " " + details
+            raise autopost.VideoDownloadError(message)
+        if not os.path.isfile(destination) or not os.path.getsize(destination):
+            raise autopost.VideoDownloadError(
+                "O Drive não retornou um trecho de vídeo analisável."
+            )
+        progress_callback(1.0)
+    finally:
+        if temporary_source and os.path.exists(temporary_source):
+            os.remove(temporary_source)
 
 
 def convert_video_for_tiktok(video_path, destination, job_id):
