@@ -344,12 +344,14 @@ class ScreenTests(StoreTests):
             self.assertIn("TikTok conectado", page)
             self.assertIn("YouTube conectado", page)
             self.assertIn("Desconectar", page)
-            self.assertNotIn("O vídeo será enviado como rascunho", page)
+            self.assertIn("O vídeo será enviado como rascunho", page)
             self.assertIn("Link da pasta do Google Drive", page)
             self.assertIn("Listar pastas", page)
             self.assertIn("A pasta precisa estar acessível", page)
+            self.assertIn('placeholder="Cole o link aqui..."', page)
+            self.assertNotIn(folder_link, page)
             self.assertNotIn("Organize seus vídeos", page)
-            self.assertNotIn("Agendamento Automático", page)
+            self.assertNotIn("Postagem Automática", page)
             self.assertNotIn("50 MIL cortes virais", page)
             self.assertNotIn('class="content-panel"', page)
             self.assertNotIn("Informações legais", page)
@@ -357,7 +359,8 @@ class ScreenTests(StoreTests):
             get_folder_view.side_effect = namespace["DriveError"]("Drive indisponível")
             response = client.post("/", data={"folder_link": folder_link})
             self.assertEqual(response.status_code, 200)
-            self.assertNotIn("Agendamento Automático", response.get_data(as_text=True))
+            self.assertNotIn("Postagem Automática", response.get_data(as_text=True))
+            self.assertNotIn(folder_link, response.get_data(as_text=True))
             save_link.assert_not_called()
 
             get_folder_view.side_effect = None
@@ -365,15 +368,25 @@ class ScreenTests(StoreTests):
             self.assertEqual(response.status_code, 200)
             page = response.get_data(as_text=True)
             self.assertIn("50 MIL cortes virais", page)
-            self.assertIn("Agendamento Automático", page)
+            self.assertIn("Postagem Automática", page)
+            self.assertNotIn(folder_link, page)
             save_link.assert_called_once_with(folder_link)
 
             load_link.return_value = folder_link
             response = client.get("/")
             self.assertEqual(response.status_code, 200)
             page = response.get_data(as_text=True)
+            self.assertNotIn("50 MIL cortes virais", page)
+            self.assertNotIn("Postagem Automática", page)
+            self.assertNotIn(folder_link, page)
+            load_link.assert_not_called()
+
+            response = client.get("/?path=folder")
+            self.assertEqual(response.status_code, 200)
+            page = response.get_data(as_text=True)
             self.assertIn("50 MIL cortes virais", page)
-            self.assertIn("Agendamento Automático", page)
+            self.assertIn("Postagem Automática", page)
+            self.assertNotIn(folder_link, page)
 
     def test_processed_preview_route_serves_only_the_prepared_report_media(self):
         from flask import Flask, request, send_file, session

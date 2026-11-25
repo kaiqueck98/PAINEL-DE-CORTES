@@ -129,7 +129,7 @@
       <p class="intro">Cole o link de uma pasta do Google Drive para navegar pelas pastas e encontrar seus vídeos.</p>
 
       <!-- BOTAO AGENDAMENTO - JA COLOCADO PRA VOCE -->
-      <a href="/agendamento" style="display:block;margin-top:20px;padding:16px;border-radius:14px;background:#7c3aed;color:#fff;font-weight:700;text-align:center;text-decoration:none;font-size:1rem">📅 Agendamento Automático - 4 vídeos por dia - 08:00, 12:30, 18:00, 21:00 - Clique aqui</a>
+      <a href="/agendamento" style="display:block;margin-top:20px;padding:16px;border-radius:14px;background:#7c3aed;color:#fff;font-weight:700;text-align:center;text-decoration:none;font-size:1rem">📅 Postagem Automática - 4 vídeos por dia - 08:00, 12:30, 18:00, 21:00 - Clique aqui</a>
     {% else %}
       <h1>Painel de Cortes Prontos</h1>
     {% endif %}
@@ -165,17 +165,15 @@
       {% for category, message in get_flashed_messages(with_categories=true) %}
         <div class="message {% if category == 'success' %}success-message{% endif %}" role="status">{{ message }}</div>
       {% endfor %}
-      {% if tiktok_connected %}
-        <section class="social-publishing-options" aria-label="Envio de rascunhos ao TikTok">
-          <p>O vídeo será enviado como rascunho para a caixa de entrada do TikTok. Abra a notificação no TikTok para adicionar texto, editar e publicar.</p>
-        </section>
-      {% endif %}
     {% endif %}
+    <section class="social-publishing-options" aria-label="Envio de rascunhos ao TikTok">
+      <p>O vídeo será enviado como rascunho para a caixa de entrada do TikTok. Abra a notificação no TikTok para adicionar texto, editar e publicar.</p>
+    </section>
 
     <form method="post">
       <label for="folder_link">Link da pasta do Google Drive</label>
       <div class="input-row">
-        <input id="folder_link" name="folder_link" type="url" placeholder="https://drive.google.com/drive/folders/..." value="{{ folder_link }}" required>
+        <input id="folder_link" name="folder_link" type="url" placeholder="Cole o link aqui..." autocomplete="off" required>
         <button type="submit">Listar pastas</button>
       </div>
       <p class="hint">A pasta precisa estar acessível pela chave da API configurada no servidor.</p>

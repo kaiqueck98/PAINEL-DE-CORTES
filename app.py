@@ -1010,14 +1010,6 @@ def index():
             error = str(exc)
         except ValueError as exc:
             error = str(exc)
-    else:
-        try:
-            folder_link = load_drive_folder_link()
-            if folder_link:
-                path_ids = [extract_folder_id(folder_link)]
-        except (AutomationSettingsError, ValueError) as exc:
-            error = str(exc)
-
     if path_ids:
         folder_link = folder_link or f"https://drive.google.com/drive/folders/{path_ids[0]}"
         api_key = os.environ.get("DRIVE_API_KEY", "").strip()
@@ -1103,7 +1095,6 @@ def index():
         posted_filter=posted_filter,
         folder_model=folder_model,
         error=error,
-        folder_link=folder_link,
         folder_loaded=folder_loaded,
     )
 
@@ -2741,8 +2732,7 @@ label{display:block;font-weight:600}.hero button{width:100%;font-size:18px}img{w
 <form method="post" class="card hero" id="automatic-form">
 <input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input type="hidden" name="action" value="automatico">
 <label for="folder">Pasta principal do Google Drive</label>
-<input id="folder" name="folder_link" type="url" required value="{{ folder_link }}" placeholder="https://drive.google.com/drive/folders/...">
-<p id="folder-storage-status" class="muted" role="status"></p>
+<input id="folder" name="folder_link" type="url" required autocomplete="off" placeholder="Cole o link aqui...">
 <button type="submit">RODAR AUTOMÁTICO</button>
 <p>08:00 · 12:30 · 18:00 · 21:00 — horário de São Paulo</p>
 <small>Prepara uma prévia. Só agenda depois de aprovar os quatro vídeos e confirmar. YouTube publica; TikTok envia rascunho.
@@ -2780,35 +2770,6 @@ access token, Phone Number ID e template aprovado com um parâmetro de corpo par
 TITLE_EDITOR_SCRIPT = r"""
 <script>
 (() => {
-  const folderInput = document.getElementById('folder');
-  const folderStorageStatus = document.getElementById('folder-storage-status');
-  const folderStorageKey = 'painel-de-cortes:agendamento:folder-link:v1';
-  if (folderInput) {
-    try {
-      const savedFolderLink = window.localStorage.getItem(folderStorageKey);
-      if (savedFolderLink !== null) folderInput.value = savedFolderLink;
-      else if (folderInput.value) window.localStorage.setItem(folderStorageKey, folderInput.value);
-      if (folderStorageStatus && folderInput.value) {
-        folderStorageStatus.textContent = 'Último link restaurado.';
-      }
-    } catch (error) {
-      if (folderStorageStatus) {
-        folderStorageStatus.textContent = 'Não foi possível acessar o armazenamento local do navegador.';
-      }
-      console.error('Não foi possível restaurar o link da pasta.', error);
-    }
-    folderInput.addEventListener('input', () => {
-      try {
-        window.localStorage.setItem(folderStorageKey, folderInput.value);
-        if (folderStorageStatus) folderStorageStatus.textContent = 'Link salvo neste navegador.';
-      } catch (error) {
-        if (folderStorageStatus) {
-          folderStorageStatus.textContent = 'Não foi possível salvar o link neste navegador.';
-        }
-        console.error('Não foi possível salvar o link da pasta.', error);
-      }
-    });
-  }
   const form = document.querySelector('form [name="folder_link"]')?.form;
   if (form) {
     for (const name of ['title_template', 'hashtags_template']) {
@@ -3666,18 +3627,12 @@ def agendamento_page():
     except Exception as exc:
         schedules = []
         erro = erro or str(exc)
-    try:
-        folder_link = load_drive_folder_link()
-    except AutomationSettingsError as exc:
-        folder_link = ""
-        erro = erro or str(exc)
     settings, notification_error = notification_settings_with_status()
     notification_values = {k: v for k, v in settings.items() if not k.endswith('TOKEN')}
     telegram_configured = bool(
         settings['TELEGRAM_BOT_TOKEN'] and settings['TELEGRAM_CHAT_ID']
     )
     html = render_template_string(AUTOMATIC_PANEL, schedules=schedules, erro=erro, ok=ok,
-                                  folder_link=folder_link,
                                   notification_fields=NOTIFICATION_FIELDS, notification_values=notification_values,
                                   notification_error=notification_error,
                                   telegram_configured=telegram_configured,
