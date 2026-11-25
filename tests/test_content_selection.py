@@ -114,7 +114,7 @@ class ContentTests(unittest.TestCase):
         day = self.store.content_overview("2026-11-21")["days"][0]
         self.assertEqual(day["progress"], 100)
         self.assertEqual(
-            day["message"], "Pronto! 4 de 4. 4 deram certo, 0 deram erro."
+            day["message"], "Pronto! 4 de 4, 4 deram certo, 0 deram erro."
         )
 
     def test_bad_sample_is_skipped_and_final_progress_counts_successes_and_errors(self):
@@ -192,8 +192,13 @@ class ContentTests(unittest.TestCase):
         copy = {'title': 'O preparo deste bolo em detalhes', 'caption_sentences': ['Uma pessoa prepara um bolo.'],
                 'hashtags': ['#Culinaria'], 'hashtag_reasons': ['A receita envolve culinária.']}
         japanese = {'text': '爆笑', 'translation': 'muito engraçado',
-                    'reason': 'A pessoa ri enquanto prepara o bolo.', 'sufficient': True}
-        with patch.object(autopost, '_content_json', side_effect=[story, copy, japanese]) as request:
+                    'reason': 'A pessoa ri enquanto prepara o bolo.',
+                    'description_japanese': '人が笑いながらケーキを作っています。',
+                    'description_translation': 'Uma pessoa prepara o bolo sorrindo.',
+                    'sufficient': True}
+        with patch.dict(os.environ, {'OPENROUTER_API_KEY': 'test-key'}), patch.object(
+            autopost, '_content_json', side_effect=[story, copy, japanese]
+        ) as request:
             result = autopost.gerar_textos_conteudo(frames, 'Agora misturamos a farinha.', self.trends)
         self.assertEqual(result['hashtags'], ['#Culinaria'])
         self.assertEqual(result['japanese'], japanese)
@@ -204,11 +209,48 @@ class ContentTests(unittest.TestCase):
         self.assertEqual(json.loads(japanese_evidence[0]['text'])['transcription'],
                          'Agora misturamos a farinha.')
         invalid = {**copy, 'hashtags': ['#Inventada']}
-        with patch.object(autopost, '_content_json', side_effect=[story, invalid, japanese]):
+        with patch.dict(os.environ, {'OPENROUTER_API_KEY': 'test-key'}), patch.object(
+            autopost, '_content_json', side_effect=[story, invalid, japanese]
+        ):
             fallback = autopost.gerar_textos_conteudo(frames, 'Agora misturamos a farinha.', self.trends)
         self.assertEqual(fallback['mode'], 'simple')
         self.assertNotIn('#Inventada', fallback['hashtags'])
         self.assertEqual(fallback['japanese'], japanese)
+
+    def test_missing_openrouter_keeps_preview_and_local_approval_available(self):
+        from PIL import Image
+
+        base_content = {
+            'summary': 'Uma pessoa prepara um bolo.',
+            'title': 'Como esse bolo ganha forma',
+            'caption': 'Uma pessoa prepara um bolo.',
+            'hashtags': [],
+        }
+        with patch.dict(os.environ, {'OPENROUTER_API_KEY': ''}), patch.object(
+            autopost, '_gerar_textos_conteudo_base', return_value=base_content
+        ):
+            content = autopost.gerar_textos_conteudo([], '', self.trends)
+        self.assertFalse(content['japanese_required'])
+        self.assertIn('japanese_error', content)
+
+        frames = []
+        for index in range(3):
+            frame = Path(self.tmp.name) / f'local-risk-{index}.jpg'
+            Image.new('RGB', (32, 32), (180, 180, 180)).save(frame)
+            frames.append(str(frame))
+        report = {
+            'sha256': 'a' * 64,
+            'quality': {
+                'brightness': 180, 'blur': 1, 'audio_db': -20, 'has_audio': True,
+            },
+            'content': content,
+        }
+        with patch.dict(os.environ, {'OPENROUTER_API_KEY': ''}), patch.object(
+            autopost, 'video_bloqueado', return_value=False
+        ):
+            report['risk'] = autopost.verificar_riscos(report, frames)
+            autopost.exigir_video_seguro(report)
+        self.assertTrue(report['risk']['checked'])
 
     def test_japanese_title_validation_accepts_any_well_formed_japanese_title(self):
         valid = {'text': '日常', 'translation': 'cotidiano', 'reason': 'Resume o assunto do vídeo.'}
@@ -218,7 +260,7 @@ class ContentTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'repetiu'):
             autopost.validar_titulo_japones(valid, ['日常'])
 
-    def test_japanese_title_swap_excludes_previous_titles_and_renders_new_one(self):
+    def test_japanese_title_swap_excludes_previous_titles_without_rendering_text_on_video(self):
         frames = []
         for index in range(3):
             path = Path(self.tmp.name) / f'frame-{index}.jpg'
@@ -227,7 +269,9 @@ class ContentTests(unittest.TestCase):
         current = {'text': '爆笑', 'translation': 'muito engraçado',
                    'reason': 'A pessoa ri.'}
         replacement = {'text': '驚愕', 'translation': 'surpresa',
-                       'reason': 'A expressão muda para espanto.'}
+                       'reason': 'A expressão muda para espanto.',
+                       'description_japanese': '驚いた表情を見せています。',
+                       'description_translation': 'A pessoa demonstra surpresa.'}
         report = {
             'content': {'summary': 'A pessoa ri e se espanta.', 'japanese': current},
             'previous_japanese_titles': ['悲哀'],
@@ -242,7 +286,7 @@ class ContentTests(unittest.TestCase):
         )
         render.assert_called_once_with(report, replacement)
         self.assertEqual(report['previous_japanese_titles'], ['悲哀', '爆笑'])
-        self.assertTrue(report['content']['japanese_required'])
+        self.assertFalse(report['content']['japanese_required'])
 
     def test_expired_trends_rejected(self):
         path = Path(self.tmp.name) / 'trends.json'

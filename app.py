@@ -877,8 +877,8 @@ def privacy():
                 "heading": "Dados utilizados",
                 "paragraphs": [
                     "O painel processa links e identificadores de pastas do Google Drive, metadados dos vídeos e os títulos e hashtags que você editar.",
-                    "Ao usar RODAR AUTOMÁTICO, o áudio é transcrito localmente com Whisper. Três frames e a transcrição são enviados ao OpenRouter para análise do conteúdo e geração dos títulos. O título japonês e sua versão em português são gravados no vídeo preparado para o agendamento.",
-                    "Se você conectar TikTok ou YouTube, o painel recebe tokens de autorização para acessar os recursos necessários. Ao solicitar um envio ao TikTok, somente o vídeo é transferido como rascunho; título, hashtags e publicação são concluídos por você no TikTok. Para o YouTube, o vídeo, título e hashtags são enviados para criar um vídeo privado.",
+                    "Ao usar RODAR AUTOMÁTICO, o áudio é transcrito localmente com Whisper. Quando o OpenRouter está configurado, três frames e a transcrição são enviados para análise do conteúdo e geração dos títulos e da descrição japonesa. O título em português, a descrição japonesa e sua tradução são armazenados junto à mídia preparada; nenhum texto é gravado sobre o vídeo.",
+                    "Se você conectar TikTok ou YouTube, o painel recebe tokens de autorização para acessar os recursos necessários. Ao solicitar um envio ao TikTok, somente o vídeo é transferido como rascunho; título, hashtags e publicação são concluídos por você no TikTok. Para o YouTube, o vídeo, o título em português e a descrição somente em japonês são enviados para criar um vídeo privado.",
                 ],
             },
             {
@@ -1779,7 +1779,7 @@ def process_social_post_job(
     video_id,
     filename,
     title,
-    hashtags,
+    description,
     api_key,
     quality_callback=None,
     content_report=None,
@@ -1810,8 +1810,6 @@ def process_social_post_job(
             workdir=workdir,
         )
         prepared = autopost.prepared_media(content_report)
-        if content_report and content_report.get('content', {}).get('japanese_required') and not prepared:
-            raise RuntimeError('A versão com título japonês precisa estar pronta antes do envio.')
         improved = copy_completed_improvement(video_id, workdir) if quality_callback is None and content_report is None else None
         if prepared:
             upload_name = os.path.basename(prepared)
@@ -1852,16 +1850,33 @@ def process_social_post_job(
             if analysis["motivos"]:
                 summary += ": " + ", ".join(analysis["motivos"])
             update_social_post_job(job_id, quality_summary=summary)
-            if analysis["qualidade"] == "RUIM":
-                quality_callback("melhorando", summary + " — melhorando nitidez, brilho/contraste e áudio")
-                update_social_post_job(job_id, message=summary + " — melhorando", progress=30)
-                if not prepared:
-                    video_path = autopost.melhorar_video(video_path, analise=analysis,
-                                                        output_dir=os.path.join(workdir, "automatico"))
-                upload_name = "video_melhorado.mp4"
-                summary += " | Melhoria aplicada (não garante recuperar detalhes ou áudio ausente)"
+            improved_path = (
+                video_path
+                if prepared
+                else autopost.melhorar_video(
+                    video_path,
+                    analise=analysis,
+                    output_dir=os.path.join(workdir, "automatico"),
+                )
+            )
+            if improved_path != video_path:
+                quality_callback("melhorando", summary + " — aplicando correções necessárias")
+                update_social_post_job(
+                    job_id, message=summary + " — aplicando correções",
+                    progress=30,
+                )
+                video_path = improved_path
+                upload_name = os.path.basename(improved_path)
+                applied = (content_report or {}).get('improvements', [])
+                summary += " | Correções automáticas: " + (
+                    ", ".join(applied) if applied else "ajustes técnicos aplicados"
+                )
+            elif prepared and content_report.get('improvements'):
+                summary += " | Correções automáticas: " + ", ".join(
+                    content_report['improvements']
+                )
             else:
-                summary += " | Original preservado"
+                summary += " | Original preservado; nenhuma correção necessária"
             update_social_post_job(job_id, quality_summary=summary, message=summary, progress=40)
             quality_callback("enviando", summary + " | Enviando")
 
@@ -1952,7 +1967,7 @@ def process_social_post_job(
             remote_id = social_publishing.publish_youtube(
                 video_path,
                 title,
-                hashtags,
+                description,
                 token,
                 progress_callback,
                 record_youtube_upload_started,
@@ -2190,7 +2205,10 @@ def start_scheduled_social_post(item, api_key):
     item['content_report'] = report
     copy = report['content']
     title = copy['title']
-    hashtags = copy['caption'] + '\n\n' + ' '.join(copy['hashtags'])
+    description = (
+        copy.get('description_japanese')
+        or copy.get('japanese', {}).get('description_japanese', '')
+    ).strip()
     job_id = uuid.uuid4().hex
     now = time.time()
     failure_message = None
@@ -2223,7 +2241,7 @@ def start_scheduled_social_post(item, api_key):
                 "platform": item["platform"],
                 "video_id": video_id,
                 "title": title,
-                "hashtags": hashtags,
+                "description": description,
             }
 
     if failure_message:
@@ -2243,7 +2261,7 @@ def start_scheduled_social_post(item, api_key):
             item,
             filename,
             title,
-            hashtags,
+            description,
             api_key,
         ),
         daemon=True,
@@ -2262,7 +2280,7 @@ def start_scheduled_social_post(item, api_key):
         )
 
 
-def process_scheduled_social_post(job_id, item, filename, title, hashtags, api_key):
+def process_scheduled_social_post(job_id, item, filename, title, description, api_key):
     def quality_progress(status, message):
         AUTPOST_STORE.update_history(item["id"], status, message, None,
                                     schedule_now().isoformat(timespec="seconds"))
@@ -2274,7 +2292,7 @@ def process_scheduled_social_post(job_id, item, filename, title, hashtags, api_k
             item["video_id"],
             filename,
             title,
-            hashtags,
+            description,
             api_key,
             quality_callback=quality_progress,
             content_report=item.get('content_report'),
@@ -2530,12 +2548,15 @@ def start_social_post(platform, video_id):
     content_report = autopost.atualizar_hashtags_para_envio(content_report)
     copy = content_report['content']
     title = request.form.get("title", "").strip() or copy['title']
-    hashtags = copy['caption'] + '\n\n' + ' '.join(copy['hashtags'])
+    description = (
+        copy.get('description_japanese')
+        or copy.get('japanese', {}).get('description_japanese', '')
+    ).strip()
     if not title:
         return jsonify(error="Preencha o título do vídeo antes de publicar."), 400
     if len(title) > 70:
         return jsonify(error="O título não pode passar de 70 caracteres."), 400
-    if platform == "youtube" and len(hashtags) > 5000:
+    if platform == "youtube" and len(description) > 5000:
         return jsonify(error="A descrição do YouTube não pode passar de 5.000 caracteres."), 400
     api_key = os.environ.get("DRIVE_API_KEY", "").strip()
     if not api_key:
@@ -2602,7 +2623,7 @@ def start_social_post(platform, video_id):
             "platform": platform,
             "video_id": video_id,
             "title": title,
-            "hashtags": hashtags,
+            "description": description,
         }
 
     worker = threading.Thread(
@@ -2613,7 +2634,7 @@ def start_social_post(platform, video_id):
             video_id,
             filename,
             title,
-            hashtags,
+            description,
             api_key,
         ),
         kwargs={"content_report": content_report},
@@ -2677,6 +2698,9 @@ label{display:block;font-weight:600}.hero button{width:100%;font-size:18px}img{w
 .analysis-progress .progress-error{color:#ffc0c0}
 .analysis-progress.has-error{border-color:#e5484d;background:#32191e;color:#ffc0c0}
 .analysis-progress.has-error progress{accent-color:#e5484d}
+.analysis-progress.is-success{border-color:#24945b;background:#14291f;color:#c5f7d8}
+.analysis-progress.is-success progress{accent-color:#22c55e}
+.video-preview{display:block;width:100%;max-width:720px;margin:14px 0;border-radius:12px;background:#000}
 </style></head><body><main>
 <a href="/">← Painel e contas conectadas</a><h1>Painel de Cortes · Automático</h1>
 <p class="muted">Até 4 vídeos distintos. Conteúdo → nota → melhoria → título → capa → postagem.</p>
@@ -2804,15 +2828,52 @@ TITLE_EDITOR_SCRIPT = r"""
       const currentDay = [...data.content.days].sort(
         (a, b) => (b.updated || 0) - (a.updated || 0)
       )[0];
+      const analysisComplete = data.content.days.some(day => Number(day.progress) >= 100);
       if (currentDay) {
         const progress = Math.max(0, Math.min(100, Number(currentDay.progress) || 0));
-        const hasError = currentDay.status === 'error'
-          || /pulado|deram erro/i.test(currentDay.message || '');
+        const errorCountMatch = /(\d+)\s+deram erro\b/i.exec(currentDay.message || '');
+        const errorCount = errorCountMatch ? Number(errorCountMatch[1]) : null;
+        const hasError = currentDay.status === 'error' || errorCount > 0;
+        const isSuccess = currentDay.status === 'ready'
+          && progress === 100 && errorCount === 0;
         progressBar.value = progress;
         progressPercent.textContent = progress + '%';
         progressMessage.textContent = currentDay.message || 'Análise em andamento...';
         progressCard.classList.toggle('has-error', hasError);
+        progressCard.classList.toggle('is-success', isSuccess);
         progressMessage.setAttribute('role', hasError ? 'alert' : 'status');
+      }
+      function addPreview(card, video, copy, revision, complete = analysisComplete) {
+        if (!complete || !video.preview_available || !video.sha256) return;
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.textContent = 'VER PRÉVIA';
+        button.style.margin = '8px 4px';
+        button.onclick = () => {
+          const current = card.querySelector('[data-video-preview]');
+          if (current) { current.remove(); button.textContent = 'VER PRÉVIA'; return; }
+          const preview = document.createElement('div');
+          preview.dataset.videoPreview = 'true';
+          const title = document.createElement('h4');
+          title.textContent = copy.title || 'Título indisponível';
+          const player = document.createElement('video');
+          player.className = 'video-preview';
+          player.controls = true;
+          player.preload = 'metadata';
+          player.playsInline = true;
+          player.src = '__COVER_ENDPOINT__'.replace('SHA', video.sha256)
+            + '?video=1&revision=' + encodeURIComponent(revision || '');
+          const japanese = document.createElement('p');
+          japanese.textContent = 'Descrição (japonês): '
+            + (copy.description_japanese || copy.japanese?.description_japanese || 'Indisponível');
+          const translation = document.createElement('p');
+          translation.textContent = 'Tradução (português): '
+            + (copy.description_translation || copy.japanese?.description_translation || 'Indisponível');
+          preview.append(title, player, japanese, translation);
+          card.append(preview);
+          button.textContent = 'FECHAR PRÉVIA';
+        };
+        card.append(button);
       }
       const history = document.getElementById('upload-history');
       if (history) {
@@ -2857,17 +2918,14 @@ TITLE_EDITOR_SCRIPT = r"""
             img.src='__COVER_ENDPOINT__'.replace('SHA',video.sha256)+'?revision='+review.revision;
             img.alt='Capa: '+copy.title; card.append(img); }
           for(const line of ['História detectada: '+copy.summary,
-            'Título no vídeo: '+(copy.japanese ? copy.japanese.text+' ('+copy.japanese.translation+')' : 'Pendente'),
+            'Título japonês: '+(copy.japanese ? copy.japanese.text+' ('+copy.japanese.translation+')' : 'Pendente'),
             'Emoção escolhida: '+(copy.japanese?.reason || copy.japanese_error || ''), 'Título para postar: '+copy.title,
             'Legenda: '+copy.caption, 'Hashtags: '+(copy.hashtags||[]).join(' '),
-            'Nota: '+video.score+'/10 — '+(video.reasons||[]).join('; ')]) {
+            'Nota: '+video.score+'/10 — '+(video.reasons||[]).join('; '),
+            ...(video.improvements?.length ? ['Correções automáticas: '+video.improvements.join(', ')] : [])]) {
             const p=document.createElement('p');p.textContent=line;card.append(p);
           }
-          if(video.japanese_variant) {
-            const caption=document.createElement('p');caption.textContent='Prévia do título nos primeiros 2 segundos';card.append(caption);
-            const image=document.createElement('img');image.src='/agendamento/titulo-japones/'+video.sha256+'/'+video.japanese_variant;
-            image.alt='Título no vídeo: '+(copy.japanese?.text || '');image.style.width='360px';card.append(image);
-          }
+          addPreview(card, video, copy, review.revision, true);
           const risk=video.risk || {checked:false, reasons:[]};
           const limitation=document.createElement('small');limitation.textContent=risk.limitation||'Triagem amostral; não comprova direitos autorais.';card.append(limitation);
           for(const reason of risk.reasons || []) {const p=document.createElement('p');p.style.color='#ff8585';
@@ -2877,7 +2935,7 @@ TITLE_EDITOR_SCRIPT = r"""
           if(review.status==='draft') {
             for(const [action,label] of [['approve','APROVAR'],['title','TROCAR TÍTULO'],['japanese','TROCAR TÍTULO JAPONÊS'],['replace','TROCAR VÍDEO']]) {
               const b=document.createElement('button');b.type='button';b.textContent=label;b.style.margin='4px';
-              if(action==='approve') {b.disabled=!risk.checked || !!risk.reasons.length || (copy.japanese_required && (!copy.japanese || video.japanese_rendered!==copy.japanese.text)) || review.state.approved.includes(video.id);
+              if(action==='approve') {b.disabled=!risk.checked || !!risk.reasons.length || review.state.approved.includes(video.id);
                 if(review.state.approved.includes(video.id)) b.textContent='APROVADO';}
               b.onclick=()=>act(action,video,b);card.append(b);
             }
@@ -2900,12 +2958,15 @@ TITLE_EDITOR_SCRIPT = r"""
         const score = video.score_scale === 10 ? video.score : video.score / 10;
         const lines = [video.name + ' | Nota: ' + score.toFixed(1) + '/10 | ' + (video.selected ? 'ESCOLHIDO' : video.status),
           'História detectada: ' + (copy.summary || 'Análise ainda indisponível'),
-          'Título no vídeo: ' + (copy.japanese ? copy.japanese.text+' ('+copy.japanese.translation+')' : (copy.japanese_error || 'Indisponível')),
+          'Título japonês: ' + (copy.japanese ? copy.japanese.text+' ('+copy.japanese.translation+')' : (copy.japanese_error || 'Indisponível')),
           'Título para postar: ' + (copy.title || ''), 'Legenda: ' + (copy.caption || ''),
           'Hashtags: ' + (copy.hashtags || []).join(' '), video.message,
           'Motivos: ' + (video.reasons || []).join('; ')];
         if (copy.uncertainty) lines.push('Limitações: ' + copy.uncertainty);
         if (copy.warning) lines.push('Aviso: ' + copy.warning);
+        if (video.improvements?.length) {
+          lines.push('Correções automáticas: ' + video.improvements.join(', '));
+        }
         if (video.asset_warning) lines.push(video.asset_warning);
         if (copy.learning?.basis) lines.push(copy.learning.basis);
         if (video.error_detail) lines.push('Detalhe do erro: ' + video.error_detail);
@@ -2919,6 +2980,7 @@ TITLE_EDITOR_SCRIPT = r"""
           const img = document.createElement('img'); img.src = '__COVER_ENDPOINT__'.replace('SHA', video.sha256);
           img.alt = 'Capa automática: ' + (copy.title || ''); img.loading = 'lazy'; card.append(img);
         }
+        addPreview(card, video, copy, currentDay?.updated || '');
         if ((video.steps || []).length) {
           const details = document.createElement('details'); details.className = 'steps';
           const summary = document.createElement('summary'); summary.textContent = 'Passo a passo'; details.append(summary);
@@ -3408,9 +3470,23 @@ def progresso_automatico():
     if not token or not supplied or not secrets.compare_digest(token, supplied):
         return jsonify(error="Atualize a página para acompanhar o progresso."), 403
     try:
+        content = AUTPOST_STORE.content_overview(schedule_now().strftime("%Y-%m-%d"))
+        reviews = AUTPOST_STORE.reviews()
+        for report in content['videos']:
+            report['preview_available'] = bool(
+                report.get('prepared_path') and os.path.isfile(report['prepared_path'])
+            )
+            for key in ('prepared_path', 'base_prepared_path', 'analysis_frames'):
+                report.pop(key, None)
+        for review in reviews:
+            for report in review.get('state', {}).get('videos', []):
+                report['preview_available'] = bool(
+                    report.get('prepared_path') and os.path.isfile(report['prepared_path'])
+                )
+                for key in ('prepared_path', 'base_prepared_path', 'analysis_frames'):
+                    report.pop(key, None)
         return jsonify(history=AUTPOST_STORE.list_history(40), warnings=automatic_warnings(),
-                       content=AUTPOST_STORE.content_overview(schedule_now().strftime("%Y-%m-%d")),
-                       reviews=AUTPOST_STORE.reviews(), notifications=notification_overview())
+                       content=content, reviews=reviews, notifications=notification_overview())
     except autopost.AutopostStoreError as exc:
         return jsonify(error=str(exc)), 503
 
@@ -3418,7 +3494,10 @@ def progresso_automatico():
 def automatic_warnings():
     warnings = []
     if not os.environ.get('OPENROUTER_API_KEY', '').strip():
-        warnings.append('OPENROUTER_API_KEY ausente: títulos simples continuam disponíveis, mas a triagem de marcas d’água não pode concluir e os vídeos não poderão ser aprovados.')
+        warnings.append(
+            'OPENROUTER_API_KEY ausente: análise local e prévias continuam disponíveis; '
+            'descrições em japonês e triagem visual por IA podem ficar indisponíveis.'
+        )
     try:
         settings = notification_settings()
         if not settings['TELEGRAM_BOT_TOKEN'] or not settings['TELEGRAM_CHAT_ID']:
@@ -3447,6 +3526,33 @@ def japanese_title_preview(sha256, variant):
 @app.route('/agendamento/capa/<sha256>')
 def automatic_cover(sha256):
     if not session.get('csrf_token') or not re.fullmatch(r'[a-f0-9]{64}', sha256):
+        return '', 404
+    if request.args.get('video') == '1':
+        try:
+            reports = [
+                report
+                for review in AUTPOST_STORE.reviews()
+                for report in review.get('state', {}).get('videos', [])
+            ]
+            reports.extend(
+                AUTPOST_STORE.content_overview(schedule_now().strftime("%Y-%m-%d"))[
+                    'videos'
+                ]
+            )
+            for report in reports:
+                if report.get('sha256') != sha256:
+                    continue
+                path = autopost.prepared_media(report)
+                if path:
+                    return send_file(
+                        path, mimetype='video/mp4', conditional=True, max_age=0,
+                    )
+        except autopost.AutopostStoreError as exc:
+            app.logger.error('Falha ao localizar prévia processada: %s', exc)
+            return '', 503
+        except (OSError, RuntimeError, ValueError) as exc:
+            app.logger.warning('Prévia processada indisponível: %s', exc)
+            return '', 404
         return '', 404
     path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'autopost_assets', sha256, 'capa.jpg')
     if not os.path.isfile(path):

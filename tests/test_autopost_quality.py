@@ -85,6 +85,45 @@ class MediaTests(unittest.TestCase):
         self.assertEqual(autopost.melhorar_video(source), source)
         self.assertEqual(hashlib.sha256(Path(source).read_bytes()).digest(), digest)
 
+    def test_dark_video_gets_brightness_correction(self):
+        source = os.path.join(self.temp.name, 'dark.mp4')
+        autopost._media_command([
+            'ffmpeg', '-hide_banner', '-y', '-f', 'lavfi', '-i',
+            'color=c=black:size=1280x720:rate=24', '-t', '2',
+            '-c:v', 'libx264', '-pix_fmt', 'yuv420p', source,
+        ])
+        before = autopost.analisar_qualidade(source)
+        self.assertLess(before['brightness'], 35)
+        output = autopost.melhorar_video(source, analise=before)
+        self.assertNotEqual(output, source)
+        after = autopost.analisar_qualidade(output)
+        self.assertGreater(after['brightness'], before['brightness'])
+
+    def test_improvement_plan_only_applies_needed_video_and_audio_filters(self):
+        good = {
+            'brightness': 100, 'blur': 2, 'audio_db': -20, 'has_audio': True,
+        }
+        dark_blurry_quiet = {
+            'brightness': 20, 'blur': 8, 'audio_db': -35, 'has_audio': True,
+        }
+        loud = {'brightness': 100, 'blur': 2, 'audio_db': -10, 'has_audio': True}
+        with patch.dict(os.environ, {
+            'AUTOPOST_MIN_BRIGHTNESS': '35',
+            'AUTOPOST_MAX_BLUR': '5',
+            'AUTOPOST_MIN_AUDIO_DB': '-30',
+        }):
+            self.assertEqual(autopost._planejar_melhorias(good), ([], [], []))
+            video_filters, audio_filters, changes = autopost._planejar_melhorias(
+                dark_blurry_quiet
+            )
+            self.assertIn('eq=brightness=0.08:contrast=1.1:saturation=1.1', video_filters)
+            self.assertIn('unsharp=5:5:0.8:5:5:0.0', video_filters)
+            self.assertEqual(audio_filters, ['volume=8dB', 'alimiter=limit=0.95'])
+            self.assertEqual(len(changes), 3)
+            _, loud_filters, loud_changes = autopost._planejar_melhorias(loud)
+        self.assertIn('loudnorm=I=-14:TP=-1.5:LRA=11', loud_filters)
+        self.assertIn('Áudio normalizado para -14 LUFS', loud_changes)
+
     def test_bad_converted_original_intact_and_audio_louder(self):
         source = self.create_media('bad.mp4', poor=True)
         digest = hashlib.sha256(Path(source).read_bytes()).digest()
@@ -220,6 +259,43 @@ class PipelineTests(unittest.TestCase):
 
 
 class ScreenTests(StoreTests):
+    def test_processed_preview_route_serves_only_the_prepared_report_media(self):
+        from flask import Flask, request, send_file, session
+
+        tree = ast.parse((ROOT / 'app.py').read_text(encoding='utf-8-sig'))
+        node = next(
+            n for n in tree.body
+            if isinstance(n, ast.FunctionDef) and n.name == 'automatic_cover'
+        )
+        web = Flask('isolated_preview_test')
+        web.secret_key = 'isolated-test-only'
+        web.testing = True
+        sha256 = 'a' * 64
+        prepared = Path(self.temp.name) / 'processed.mp4'
+        prepared.write_bytes(b'processed preview')
+        self.store.reviews = Mock(return_value=[{
+            'state': {'videos': [{'sha256': sha256, 'prepared_path': 'stored/path'}]},
+        }])
+        ns = {
+            'app': web, 'request': request, 'session': session, 'send_file': send_file,
+            're': re, 'os': os, 'AUTPOST_STORE': self.store, 'autopost': autopost,
+            'schedule_now': datetime.now,
+        }
+        exec(compile(ast.Module(body=[node], type_ignores=[]), '<preview-route>', 'exec'), ns)
+        web.add_url_rule(
+            '/agendamento/capa/<sha256>', endpoint='automatic_cover',
+            view_func=ns['automatic_cover'],
+        )
+        client = web.test_client()
+        with client.session_transaction() as state:
+            state['csrf_token'] = 'test-token'
+        with patch.object(autopost, 'prepared_media', return_value=str(prepared)):
+            response = client.get(f'/agendamento/capa/{sha256}?video=1')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.mimetype, 'video/mp4')
+        self.assertEqual(response.get_data(), b'processed preview')
+        response.close()
+
     def test_automatic_button_route_defaults_and_status(self):
         from flask import Flask, jsonify, render_template, request, session, url_for
         web = Flask('isolated_test', template_folder=str(ROOT / 'templates'))
