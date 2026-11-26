@@ -936,7 +936,7 @@ def index():
     view = None
     error = None
     folder_link = ""
-    folder_loaded = False
+    dashboard_view = request.endpoint == "dashboard"
     submitted_folder_link = False
     path_ids = []
     sort_order = ""
@@ -944,6 +944,12 @@ def index():
     posted_filter = "all"
     folder_model = {}
 
+    if (
+        request.method == "GET"
+        and request.endpoint == "index"
+        and request.args.get("path")
+    ):
+        return redirect(url_for("dashboard", **request.args.to_dict()))
     if request.method == "POST" and request.form.get("action") in {
         "mark_good",
         "save_model",
@@ -1080,7 +1086,6 @@ def index():
             if submitted_folder_link:
                 save_drive_folder_link(folder_link)
                 return redirect(url_for("dashboard"))
-            folder_loaded = True
         except (
             DriveError,
             AutomationSettingsError,
@@ -1103,7 +1108,7 @@ def index():
         posted_filter=posted_filter,
         folder_model=folder_model,
         error=error,
-        folder_loaded=folder_loaded,
+        dashboard_view=dashboard_view,
     )
 
 
