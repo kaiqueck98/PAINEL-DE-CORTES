@@ -3056,16 +3056,28 @@ TITLE_EDITOR_SCRIPT = r"""
         (a, b) => (b.updated || 0) - (a.updated || 0)
       )[0];
       const analysisComplete = data.content.days.some(day => Number(day.progress) >= 100);
+      const errorReports = (data.content.videos || []).filter(video => video.status === 'error');
+      const errorSummary = /(Pronto! \d+ de \d+, \d+ deram certo, \d+ deram erro\.)/i.exec(
+        currentDay?.message || ''
+      );
+      const errorCountMatch = /(\d+)\s+deram erro\b/i.exec(currentDay?.message || '');
+      const reportedErrorCount = errorCountMatch
+        ? Number(errorCountMatch[1])
+        : errorReports.length;
+      const errorCount = currentDay?.status === 'error' && reportedErrorCount === 0
+        ? 1 : Math.max(reportedErrorCount, errorReports.length);
       if (currentDay) {
         const progress = Math.max(0, Math.min(100, Number(currentDay.progress) || 0));
-        const errorCountMatch = /(\d+)\s+deram erro\b/i.exec(currentDay.message || '');
-        const errorCount = errorCountMatch ? Number(errorCountMatch[1]) : null;
         const hasError = currentDay.status === 'error' || errorCount > 0;
-        const isSuccess = currentDay.status === 'ready'
-          && progress === 100 && errorCount === 0;
+        const isSuccess = currentDay.status !== 'error'
+          && progress === 100 && reportedErrorCount === 0 && errorReports.length === 0;
         progressBar.value = progress;
         progressPercent.textContent = progress + '%';
-        progressMessage.textContent = currentDay.message || 'Análise em andamento...';
+        progressMessage.textContent = errorSummary?.[1]
+          || (currentDay.status === 'error' ? 'Análise concluída com erro.'
+            : currentDay.status === 'analyzing'
+              ? `Analisando vídeos... ${currentDay.current_index || 0} de ${currentDay.total || 0}.`
+              : progress === 100 ? 'Análise concluída.' : 'Preparando os vídeos...');
         progressCard.classList.toggle('has-error', hasError);
         progressCard.classList.toggle('is-success', isSuccess);
         progressMessage.setAttribute('role', hasError ? 'alert' : 'status');
@@ -3102,27 +3114,120 @@ TITLE_EDITOR_SCRIPT = r"""
         };
         card.append(button);
       }
+      function simpleStatus(value) {
+        const status = String(value || '').toLowerCase();
+        if (['postado', 'posted'].includes(status)) return 'Postado';
+        if (['erro', 'error', 'failed', 'falhou', 'rejected'].includes(status)) return 'Erro';
+        if (['analisando', 'melhorando', 'enviando', 'processing', 'pending'].includes(status)) {
+          return 'Analisando';
+        }
+        return 'Pronto';
+      }
+      function videoStatus(video, slotTime) {
+        const rows = (data.history || []).filter(row =>
+          row.video_id === video.id && row.run_time === slotTime
+            && (!currentDay || row.run_date === currentDay.run_date)
+        );
+        const statuses = rows.map(row => simpleStatus(row.status));
+        if (statuses.includes('Postado')) return 'Postado';
+        if (statuses.includes('Erro')) return 'Erro';
+        if (statuses.includes('Analisando')) return 'Analisando';
+        return 'Pronto';
+      }
+      function improvementLabels(video) {
+        return (video.improvements || []).map(change => {
+          const value = String(change).toLowerCase();
+          if (value.includes('brilho')) return 'Brilho corrigido';
+          if (value.includes('nitidez') || value.includes('desfoque')) return 'Nitidez ajustada';
+          if (value.includes('áudio') || value.includes('audio')
+              || value.includes('volume') || value.includes('lufs')) return 'Áudio normalizado';
+          return '';
+        }).filter((value, index, values) => value && values.indexOf(value) === index);
+      }
+      const slotTimes = ['08:00', '12:30', '18:00', '21:00'];
+      function renderVideoCard(video, index, container, revision, complete, review = null, onApprove = null) {
+        const card = document.createElement('article');
+        card.className = 'card';
+        const copy = video.content || {};
+        if (video.thumbnail && video.sha256) {
+          const img = document.createElement('img');
+          img.src = '__COVER_ENDPOINT__'.replace('SHA', video.sha256)
+            + (review ? '?revision=' + review.revision : '');
+          img.alt = 'Miniatura: ' + (copy.title || 'vídeo');
+          img.loading = 'lazy';
+          card.append(img);
+        }
+        const title = document.createElement('h4');
+        title.textContent = copy.title || 'Título indisponível';
+        card.append(title);
+        const time = document.createElement('p');
+        time.textContent = 'Horário: ' + slotTimes[index];
+        card.append(time);
+        const status = document.createElement('p');
+        status.textContent = 'Status: ' + videoStatus(video, slotTimes[index]);
+        card.append(status);
+        const changes = improvementLabels(video);
+        if (changes.length) {
+          const improvement = document.createElement('p');
+          improvement.textContent = changes.join(' · ');
+          card.append(improvement);
+        }
+        addPreview(card, video, copy, revision, complete);
+        if (review?.status === 'draft') {
+          const risk = video.risk || {checked:false, reasons:[]};
+          const button = document.createElement('button');
+          button.type = 'button';
+          button.textContent = review.state.approved.includes(video.id) ? 'APROVADO' : 'APROVAR';
+          button.disabled = !risk.checked || !!risk.reasons.length
+            || review.state.approved.includes(video.id);
+          button.onclick = () => onApprove(video, button);
+          card.append(button);
+        }
+        container.append(card);
+      }
       const history = document.getElementById('upload-history');
       if (history) {
         history.replaceChildren();
         for (const row of data.history) {
           const p = document.createElement('p');
-          p.textContent = `${row.run_date} ${row.run_time} | ${row.video_name} | ${row.platform} | ${row.status}: ${row.message || 'Aguardando'}`;
+          p.textContent = `${row.run_date} ${row.run_time} | ${row.platform} | ${simpleStatus(row.status)}`;
           history.append(p);
         }
         if (!data.history.length) history.textContent = 'Ainda não há envios.';
       }
       body.replaceChildren();
+      if (errorCount > 0 || currentDay?.status === 'error') {
+        const details = document.createElement('details');
+        details.className = 'card';
+        const summary = document.createElement('summary');
+        const count = Math.max(errorCount, currentDay?.status === 'error' ? 1 : 0);
+        summary.textContent = `${count} ${count === 1 ? 'vídeo com erro' : 'vídeos com erro'} - ver detalhes`;
+        details.append(summary);
+        for (const video of errorReports) {
+          const p = document.createElement('p');
+          p.textContent = `${video.name || 'Vídeo'}: ${video.error_detail || video.message || 'Falha na análise.'}`;
+          details.append(p);
+        }
+        if (!errorReports.length && currentDay?.status === 'error') {
+          const p = document.createElement('p');
+          p.textContent = (currentDay.message || 'Falha na análise.')
+            .replace(errorSummary?.[1] || '', '').trim();
+          details.append(p);
+        }
+        body.append(details);
+      }
       for(const event of (data.notifications || [])) {
         const p=document.createElement('p');p.className='notice';p.textContent=event.message+' — '+event.result;body.append(p);
       }
       for (const warning of (data.warnings || [])) {
         const p = document.createElement('p'); p.className = 'notice'; p.textContent = warning; body.append(p);
       }
-      for (const day of data.content.days) {
-        const p = document.createElement('p'); p.textContent = day.status + ': ' + day.message; body.append(p);
-      }
-      for (const review of (data.reviews || [])) {
+      const currentReview = (data.reviews || []).find(item =>
+        currentDay && item.run_date === currentDay.run_date
+          && item.schedule_id === currentDay.schedule_id
+      ) || (!currentDay ? (data.reviews || [])[0] : null);
+      if (currentReview) {
+        const review = currentReview;
         const section = document.createElement('section'); section.className = 'card';
         const header = document.createElement('h3');
         header.textContent = review.status === 'confirmed' ? 'Lote confirmado · ' + review.target_date : 'Prévia — aprove os quatro vídeos';
@@ -3138,38 +3243,12 @@ TITLE_EDITOR_SCRIPT = r"""
             notice.textContent = result.message; location.reload();
           } catch(e) { notice.textContent=e.message; button.disabled=false; editing=false; }
         }
-        for (const video of review.state.videos) {
-          const card = document.createElement('article'); card.className='card';
-          const copy=video.content || {};
-          if(video.thumbnail) { const img=document.createElement('img');
-            img.src='__COVER_ENDPOINT__'.replace('SHA',video.sha256)+'?revision='+review.revision;
-            img.alt='Capa: '+copy.title; card.append(img); }
-          for(const line of ['História detectada: '+copy.summary,
-            'Título japonês: '+(copy.japanese ? copy.japanese.text+' ('+copy.japanese.translation+')' : 'Pendente'),
-            'Emoção escolhida: '+(copy.japanese?.reason || copy.japanese_error || ''), 'Título para postar: '+copy.title,
-            'Legenda: '+copy.caption, 'Hashtags: '+(copy.hashtags||[]).join(' '),
-            'Nota: '+video.score+'/10 — '+(video.reasons||[]).join('; '),
-            ...(video.improvements?.length ? ['Correções automáticas: '+video.improvements.join(', ')] : [])]) {
-            const p=document.createElement('p');p.textContent=line;card.append(p);
-          }
-          addPreview(card, video, copy, review.revision, true);
-          const risk=video.risk || {checked:false, reasons:[]};
-          const limitation=document.createElement('small');limitation.textContent=risk.limitation||'Triagem amostral; não comprova direitos autorais.';card.append(limitation);
-          for(const reason of risk.reasons || []) {const p=document.createElement('p');p.style.color='#ff8585';
-            p.textContent='RISCO: '+reason;card.append(p);}
-          if(!risk.checked){const p=document.createElement('p');p.style.color='#ff8585';
-            p.textContent='Verificação incompleta: '+(risk.warning||'aguardando triagem');card.append(p);}
-          if(review.status==='draft') {
-            for(const [action,label] of [['approve','APROVAR'],['title','TROCAR TÍTULO'],['japanese','TROCAR TÍTULO JAPONÊS'],['replace','TROCAR VÍDEO']]) {
-              const b=document.createElement('button');b.type='button';b.textContent=label;b.style.margin='4px';
-              if(action==='approve') {b.disabled=!risk.checked || !!risk.reasons.length || review.state.approved.includes(video.id);
-                if(review.state.approved.includes(video.id)) b.textContent='APROVADO';}
-              b.onclick=()=>act(action,video,b);card.append(b);
-            }
-          }
-          const b=document.createElement('button');b.type='button';b.textContent='Copiar título e hashtags';
-          b.onclick=async()=>{try{await navigator.clipboard.writeText(copy.title+'\n'+(copy.hashtags||[]).join(' '));b.textContent='Copiado';}
-            catch(_){b.textContent='Selecione e copie os textos acima';}};card.append(b);section.append(card);
+        const selectedVideos = review.state.videos.slice(0, 4);
+        for (const [index, video] of selectedVideos.entries()) {
+          renderVideoCard(
+            video, index, section, review.revision, true, review,
+            (item, button) => act('approve', item, button)
+          );
         }
         if(review.status==='draft' && review.state.videos.length===4 && review.state.videos.every(v=>review.state.approved.includes(v.id))) {
           const p=document.createElement('p');p.textContent='Horários: 08:00, 12:30, 18:00 e 21:00 (São Paulo). Após 08:00, o lote será agendado para amanhã.';section.append(p);
@@ -3179,53 +3258,16 @@ TITLE_EDITOR_SCRIPT = r"""
         }
         body.append(section);
       }
-      for (const video of data.content.videos) {
-        const card = document.createElement('article'); card.className = 'card';
-        const copy = video.content || {};
-        const score = video.score_scale === 10 ? video.score : video.score / 10;
-        const lines = [video.name + ' | Nota: ' + score.toFixed(1) + '/10 | ' + (video.selected ? 'ESCOLHIDO' : video.status),
-          'História detectada: ' + (copy.summary || 'Análise ainda indisponível'),
-          'Título japonês: ' + (copy.japanese ? copy.japanese.text+' ('+copy.japanese.translation+')' : (copy.japanese_error || 'Indisponível')),
-          'Título para postar: ' + (copy.title || ''), 'Legenda: ' + (copy.caption || ''),
-          'Hashtags: ' + (copy.hashtags || []).join(' '), video.message,
-          'Motivos: ' + (video.reasons || []).join('; ')];
-        if (copy.uncertainty) lines.push('Limitações: ' + copy.uncertainty);
-        if (copy.warning) lines.push('Aviso: ' + copy.warning);
-        if (video.improvements?.length) {
-          lines.push('Correções automáticas: ' + video.improvements.join(', '));
+      if (!currentReview) {
+        const selectedVideos = (data.content.videos || [])
+          .filter(video => video.selected)
+          .sort((a, b) => (Number(b.score) || 0) - (Number(a.score) || 0)
+            || String(a.id).localeCompare(String(b.id)))
+          .slice(0, 4);
+        for (const [index, video] of selectedVideos.entries()) {
+          renderVideoCard(video, index, body, currentDay?.updated || '', analysisComplete);
         }
-        if (video.asset_warning) lines.push(video.asset_warning);
-        if (copy.learning?.basis) lines.push(copy.learning.basis);
-        if (video.error_detail) lines.push('Detalhe do erro: ' + video.error_detail);
-        for (const [tag, reason] of Object.entries(copy.hashtag_reasons || {})) {
-          const source = (copy.hashtag_sources || {})[tag] || {};
-          lines.push(`${tag}: ${reason} | ${source.evidence || ''} | ${source.source || ''} | ${source.measured_at || ''}`);
-        }
-        if (copy.trend_source) lines.push('Lista de tendências: ' + copy.trend_source + ' | ' + copy.trend_updated_at);
-        for (const line of lines) { const p = document.createElement('p'); p.textContent = line; card.append(p); }
-        if (video.thumbnail && video.sha256) {
-          const img = document.createElement('img'); img.src = '__COVER_ENDPOINT__'.replace('SHA', video.sha256);
-          img.alt = 'Capa automática: ' + (copy.title || ''); img.loading = 'lazy'; card.append(img);
-        }
-        addPreview(card, video, copy, currentDay?.updated || '');
-        if ((video.steps || []).length) {
-          const details = document.createElement('details'); details.className = 'steps';
-          const summary = document.createElement('summary'); summary.textContent = 'Passo a passo'; details.append(summary);
-          for (const text of video.steps) {const p = document.createElement('p'); p.textContent = text; details.append(p);}
-          card.append(details);
-        }
-        if (copy.title) {
-          const button = document.createElement('button'); button.type = 'button';
-          button.textContent = 'Copiar título e hashtags';
-          button.onclick = async () => {
-            try { await navigator.clipboard.writeText(copy.title + '\n' + copy.hashtags.join(' ')); button.textContent = 'Copiado'; }
-            catch (_) { button.textContent = 'Selecione e copie os textos acima'; }
-          };
-          card.append(button);
-        }
-        body.append(card);
       }
-      if (!data.content.days.length) {const p = document.createElement('p');p.textContent='Clique em RODAR AUTOMÁTICO para começar a análise.';body.append(p);}
     } catch (error) { body.textContent = error.message; }
     finally { setTimeout(refreshContent, 5000); }
   }

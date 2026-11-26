@@ -790,6 +790,46 @@ class ScreenTests(StoreTests):
         self.assertNotIn("TESTAR TELEGRAM", page)
         self.assertNotIn("TELEGRAM_BOT_TOKEN", page)
 
+    def test_automatic_video_cards_hide_technical_details(self):
+        tree = ast.parse((ROOT / "app.py").read_text(encoding="utf-8-sig"))
+        script_node = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.Assign)
+            and any(
+                isinstance(target, ast.Name) and target.id == "TITLE_EDITOR_SCRIPT"
+                for target in node.targets
+            )
+        )
+        script = ast.literal_eval(script_node.value)
+        card_renderer_start = script.index("function renderVideoCard(")
+        card_renderer_end = script.index("const history = document.getElementById('upload-history')")
+        card_renderer = script[card_renderer_start:card_renderer_end]
+
+        self.assertIn("const errorReports = (data.content.videos || []).filter(video => video.status === 'error')", script)
+        self.assertIn("details.append(summary)", script)
+        self.assertIn("video.error_detail || video.message", script)
+        self.assertIn("progress === 100 && reportedErrorCount === 0", script)
+        self.assertIn("review.state.videos.slice(0, 4)", script)
+        self.assertIn(".filter(video => video.selected)", script)
+        self.assertIn("'VER PRÉVIA'", script)
+        self.assertIn("'APROVAR'", script)
+        self.assertIn("Pronto! \\d+ de \\d+, \\d+ deram certo, \\d+ deram erro\\.", script)
+        self.assertNotIn("details.open", script)
+        for technical in (
+            "error_detail",
+            "error_detail:",
+            "video.message",
+            "video.name",
+            "video.steps",
+            "História detectada:",
+            "Título japonês:",
+            "Detalhes:",
+            "pulado - erro do Drive",
+        ):
+            self.assertNotIn(technical, card_renderer)
+        self.assertNotIn("day.status + ': ' + day.message", script)
+
     def test_processed_preview_route_serves_only_the_prepared_report_media(self):
         from flask import Flask, request, send_file, session
 
