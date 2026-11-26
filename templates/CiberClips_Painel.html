@@ -1,0 +1,373 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="csrf-token" content="{{ csrf_token }}">
+  <title>{% if not authenticated %}CIBERCLIPS{% elif panel_page == 'settings' %}Configurações — CIBERCLIPS{% elif panel_page == 'clips' %}Meus cortes — CIBERCLIPS{% elif panel_page == 'stats' %}Estatísticas — CIBERCLIPS{% else %}Home — CIBERCLIPS{% endif %}</title>
+  <style>
+    *{box-sizing:border-box}
+    body{margin:0;background:#0b0b12;color:#f5f3ff;font:15px system-ui,sans-serif}
+    button,input,select{font:inherit}
+    button{cursor:pointer;border:0;border-radius:9px;padding:12px 18px;background:#8b5cf6;color:white;font-weight:600}
+    button:hover{filter:brightness(1.2)}
+    input,select{width:100%;padding:13px;border:1px solid #343044;background:#15131f;color:white;border-radius:9px;margin:8px 0 16px}
+    input[type=hidden]{display:none}
+    label{color:#bcb6ce}
+    h1,h2,h3{margin:0 0 15px}
+    p{color:#a6a0b6}
+    small{color:#a6a0b6}
+    .brand{font-weight:900;letter-spacing:2px;font-size:24px}
+    .brand b{color:#a78bfa}
+    .login{min-height:100vh;display:grid;place-items:center;background:radial-gradient(ellipse at 15% 20%,#36205b,transparent 55%),#0b0b12}
+    .loginbox{width:min(920px,94vw);display:grid;grid-template-columns:1fr 1fr;border:1px solid #35294b;border-radius:24px;overflow:hidden;background:#101019;box-shadow:0 20px 100px #0008}
+    .hero{padding:45px;background:linear-gradient(140deg,#281747,#14101f);display:flex;flex-direction:column;justify-content:space-between;min-height:480px}
+    .hero h1{font-size:44px;line-height:1.1}
+    .play{font-size:65px;text-align:center;color:#c4b5fd;text-shadow:0 0 45px #8b5cf6}
+    .form{padding:45px;align-self:center}
+    .wide{width:100%}
+    .muted{background:#211c30}
+    .app{display:grid;grid-template-columns:235px 1fr;min-height:100vh}
+    aside{background:#11101a;border-right:1px solid #252233;padding:24px 16px;display:flex;flex-direction:column;gap:8px}
+    aside .brand{font-size:20px;margin-bottom:35px}
+    nav{display:grid;gap:7px}
+    nav a{display:block;text-align:left;background:transparent;color:#a9a3b9;text-decoration:none;padding:12px 18px;border-radius:9px;font-weight:600}
+    nav a:hover{filter:brightness(1.2);color:#f5f3ff}
+    nav a.active{background:#30204c;color:#d5c4ff}
+    main{padding:30px;min-width:0}
+    header{display:flex;justify-content:space-between;align-items:center;margin-bottom:30px;gap:12px}
+    .avatar{background:#30204c;padding:12px;border-radius:50%}
+    .banner{padding:30px;border-radius:18px;background:linear-gradient(110deg,#3c216d,#171324);border:1px solid #56388b;margin-bottom:24px}
+    .grid{display:grid;grid-template-columns:repeat(3,1fr);gap:15px}
+    .card{background:#15131e;border:1px solid #292538;border-radius:14px;padding:20px;margin-bottom:18px}
+    .metric{font-size:32px;font-weight:800;margin-top:12px}
+    .row{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap}
+    .folder-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:15px}
+    .folder-card{display:block;min-height:140px;padding:20px;border:1px solid #292538;border-radius:14px;background:#15131e;color:#f5f3ff;text-decoration:none}
+    .folder-card:hover{border-color:#8b5cf6;transform:translateY(-2px)}
+    .folder-icon{color:#a78bfa;font-size:23px}
+    .folder-card h3{margin:14px 0 8px;overflow-wrap:anywhere}
+    .folder-card small{display:block}
+    .clip-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:15px;align-items:start}
+    .clip-review{grid-column:1/-1}
+    .clip-card{margin:0;min-width:0}
+    .clip-card img{display:block;width:100%;aspect-ratio:16/9;object-fit:cover;border-radius:9px;margin:0 0 14px;background:#09080d}
+    .clip-card h4{margin:0 0 10px;overflow-wrap:anywhere}
+    .clip-card p{margin:8px 0}
+    .message{margin:14px 0;padding:14px 16px;border:1px solid #704f35;border-radius:10px;background:#33251b;color:#fdba74;line-height:1.5}
+    .message.success{border-color:#347653;background:#1d3b2a;color:#a7f3c1}
+    .config-section{margin:18px 0}
+    .config-section > h3{margin-bottom:10px}
+    .config-form{margin:0}
+    .form-row{display:flex;gap:10px;align-items:end}
+    .form-row label{flex:1}
+    .form-actions{display:flex;gap:8px}
+    .form-actions button{white-space:nowrap}
+    .social-connections{display:flex;flex-wrap:wrap;gap:10px;margin:14px 0}
+    .connection-group{display:inline-flex;align-items:center;flex-wrap:wrap;gap:6px}
+    .connection-link{display:inline-flex;align-items:center;justify-content:center;padding:10px 14px;border:1px solid #514276;border-radius:10px;background:#29213b;color:#ddd6fe;font-size:.85rem;font-weight:700;text-decoration:none}
+    .connection-link.connected{border-color:#347653;background:#1d3b2a;color:#a7f3c1}
+    .connection-link.disconnected{border-color:#3c3d48;background:#24252d;color:#d4d4d8}
+    .connection-disconnect-form{margin:0}
+    .connection-disconnect-form button{padding:10px 14px}
+    .social-publishing-options{padding:14px;border:1px solid #292538;border-radius:12px;background:#15131e}
+    .notification-card{margin:18px 0;padding:18px;border:1px solid #343044;border-radius:14px;background:#15131e}
+    .notification-card summary{cursor:pointer;font-weight:700}
+    .notification-card form{margin-top:16px}
+    .notification-card input:not([type=hidden]){display:block}
+    .notification-card button{width:auto}
+    .settings-hint{margin:8px 0;color:#a6a0b6;font-size:.86rem}
+    .analysis-progress{padding:18px;border:1px solid #485572;border-radius:12px;background:#101726}
+    .analysis-progress progress{display:block;width:100%;height:28px;margin:12px 0;accent-color:#22c55e}
+    .analysis-progress.has-error{border-color:#e5484d;background:#32191e;color:#ffc0c0}
+    .analysis-progress.has-error progress{accent-color:#e5484d}
+    .analysis-progress.is-success{border-color:#24945b;background:#14291f;color:#c5f7d8}
+    .analysis-progress.is-success progress{accent-color:#22c55e}
+    .video-preview-modal{position:fixed;inset:0;z-index:1000;display:grid;place-items:center;padding:18px;background:rgba(0,0,0,.82)}
+    .video-preview-modal[hidden]{display:none}
+    .video-preview-dialog{width:min(900px,100%);max-height:calc(100vh - 36px);overflow:auto;padding:22px;border:1px solid #485572;border-radius:16px;background:#15131e}
+    .video-preview-dialog header{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:0}
+    .video-preview-dialog h2{margin:0}
+    .video-preview-close-x{width:44px;height:44px;padding:0;font-size:22px}
+    .video-preview{display:block;width:100%;max-height:70vh;max-width:100%;margin:16px 0;border-radius:12px;background:#000;object-fit:contain}
+    .video-preview-close-button{width:100%;margin-top:12px}
+    .sidebar-logout{margin-top:auto;text-align:left}
+    .sidebar-logout form{margin:0}
+    .error-summary{color:#ffc0c0}
+    .hidden,[hidden]{display:none!important}
+    video{max-width:100%;max-height:260px;border-radius:8px;object-fit:contain}
+    a{color:#c4b5fd}
+    @media(max-width:700px){
+      .loginbox{grid-template-columns:1fr}
+      .hero{min-height:180px;padding:25px}
+      .hero h1{font-size:28px}
+      .play{display:none}
+      .form{padding:25px}
+      .app{grid-template-columns:1fr}
+      aside{padding:12px}
+      aside .brand{margin:0}
+      nav{display:flex;overflow:auto}
+      nav a{white-space:nowrap}
+      main{padding:16px}
+      .grid{grid-template-columns:1fr 1fr}
+      .metric{font-size:24px}
+      .form-row{align-items:stretch;flex-direction:column}
+      .form-actions button{flex:1}
+    }
+  </style>
+</head>
+<body>
+  {% if not authenticated %}
+    <section id="login" class="login">
+      <div class="loginbox">
+        <div class="hero">
+          <div class="brand">◈ CIBER<b>CLIPS</b></div>
+          <div class="play" aria-hidden="true">▶</div>
+          <div>
+            <h1>O futuro dos cortes começa aqui.</h1>
+            <p>Crie. Gerencie. Compartilhe.</p>
+          </div>
+        </div>
+        <form class="form" id="loginForm" method="post" action="{{ url_for('login_submit') }}">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <small>ÁREA DE ACESSO</small>
+          <h2>Bem-vindo de volta.</h2>
+          <p>Entre para acessar seu painel.</p>
+          <label for="user">Usuário</label>
+          <input id="user" name="user" required placeholder="Seu usuário" autocomplete="username">
+          <label for="pass">Senha</label>
+          <input id="pass" name="password" type="password" required placeholder="Sua senha" autocomplete="current-password">
+          <label>
+            <input id="show-password" style="width:auto;margin:0 6px 18px 0" type="checkbox">
+            Mostrar senha
+          </label>
+          <button class="wide" type="submit">Entrar no painel →</button>
+          <p id="status" role="status">{{ error or '' }}</p>
+        </form>
+      </div>
+    </section>
+    <script>
+      document.getElementById('show-password').addEventListener('change', event => {
+        document.getElementById('pass').type = event.target.checked ? 'text' : 'password';
+      });
+    </script>
+  {% else %}
+    <div class="app">
+      <aside>
+        <div class="brand">◈ CIBER<b>CLIPS</b></div>
+        <nav id="nav" aria-label="Navegação principal">
+          <a data-page="home" class="{% if panel_page == 'home' %}active{% endif %}" href="{{ url_for('dashboard', page='home') }}">⌂ &nbsp; Home</a>
+          <a data-page="clips" class="{% if panel_page == 'clips' %}active{% endif %}" href="{{ url_for('dashboard', page='clips', path=path_string or None) }}">▷ &nbsp; Meus cortes</a>
+          <a data-page="stats" class="{% if panel_page == 'stats' %}active{% endif %}" href="{{ url_for('dashboard', page='stats', path=path_string or None) }}">▥ &nbsp; Estatísticas</a>
+          <a data-page="settings" class="{% if panel_page == 'settings' %}active{% endif %}" href="{{ url_for('configuration') }}">⚙ &nbsp; Configurações</a>
+        </nav>
+        <form class="sidebar-logout" method="post" action="{{ url_for('logout') }}">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button class="muted wide" type="submit">Sair</button>
+        </form>
+      </aside>
+      <main>
+        <header>
+          <div>
+            <small>WORKSPACE / CIBERCLIPS</small>
+            <h2>{% if panel_page == 'settings' %}Configurações{% elif panel_page == 'clips' %}Meus cortes{% elif panel_page == 'stats' %}Estatísticas{% else %}Visão geral{% endif %}</h2>
+          </div>
+          <div class="row"><span class="avatar">◈</span></div>
+        </header>
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        {% for category, message in get_flashed_messages(with_categories=true) %}
+          <div class="message {% if category == 'success' %}success{% endif %}" role="{{ 'alert' if category == 'error' else 'status' }}">{{ message }}</div>
+        {% endfor %}
+
+        {% if panel_page == 'settings' %}
+          <section class="card config-section" aria-labelledby="drive-heading">
+            <h3 id="drive-heading">Pasta principal do Google Drive</h3>
+            {% if drive_settings_error %}<div class="message" role="alert">{{ drive_settings_error }}</div>{% endif %}
+            {% if drive_link_saved %}<p role="status">Link salvo no servidor ✅</p>{% endif %}
+            <form class="config-form" method="post" action="{{ url_for('configuration') }}">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <label for="drive_folder_link">Link da pasta do Google Drive</label>
+              <div class="form-row">
+                <input id="drive_folder_link" name="folder_link" type="url" value="{{ drive_folder_value }}" placeholder="Cole o link aqui..." autocomplete="off">
+                <div class="form-actions">
+                  <button type="submit" name="action" value="save_drive_folder">Salvar</button>
+                  <button class="muted" type="submit" name="action" value="delete_drive_folder"{% if not drive_link_saved %} disabled{% endif %}>Apagar</button>
+                </div>
+              </div>
+            </form>
+          </section>
+
+          <section class="card config-section" aria-labelledby="social-heading">
+            <h3 id="social-heading">Conectar TikTok e YouTube</h3>
+            {% if social_token_error %}<div class="message" role="alert">{{ social_token_error }}</div>{% endif %}
+            <nav class="social-connections" aria-label="Conectar redes sociais">
+              <div class="connection-group">
+                <a class="connection-link {% if tiktok_connected %}connected{% else %}disconnected{% endif %}" href="{{ url_for('start_social_oauth', platform='tiktok') }}">
+                  {% if tiktok_connected %}TikTok conectado ✅{% else %}TikTok desconectado · Conectar{% endif %}
+                </a>
+                {% if tiktok_connected %}
+                  <form class="connection-disconnect-form" method="post" action="{{ url_for('disconnect_social', platform='tiktok') }}">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                    <button class="connection-link disconnected" type="submit" aria-label="Desconectar TikTok">Desconectar</button>
+                  </form>
+                {% endif %}
+              </div>
+              <div class="connection-group">
+                <a class="connection-link {% if youtube_connected %}connected{% else %}disconnected{% endif %}" href="{{ url_for('start_social_oauth', platform='youtube') }}">
+                  {% if youtube_connected %}YouTube conectado ✅{% else %}YouTube desconectado · Conectar{% endif %}
+                </a>
+                {% if youtube_connected %}
+                  <form class="connection-disconnect-form" method="post" action="{{ url_for('disconnect_social', platform='youtube') }}">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                    <button class="connection-link disconnected" type="submit" aria-label="Desconectar YouTube">Desconectar</button>
+                  </form>
+                {% endif %}
+              </div>
+            </nav>
+            <div class="social-publishing-options">
+              <p>O vídeo será enviado como rascunho para a caixa de entrada do TikTok. Abra a notificação no TikTok para adicionar texto, editar e publicar.</p>
+            </div>
+          </section>
+
+          <details class="notification-card">
+            <summary>Configurações de avisos</summary>
+            <form method="post" action="{{ url_for('salvar_notificacoes') }}">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              {% for field in notification_fields %}
+                <label>{{ field }}
+                  <input name="{{ field }}" type="{{ 'password' if field.endswith('TOKEN') else 'text' }}"
+                    value="{{ '' if field.endswith('TOKEN') else notification_values.get(field, '') }}" autocomplete="off">
+                </label>
+              {% endfor %}
+              <p>Token vazio mantém o valor salvo. Telegram: inicie uma conversa com seu bot. WhatsApp: use número com país e DDD, access token, Phone Number ID e template aprovado com um parâmetro de corpo para a mensagem. Idioma padrão: pt_BR.</p>
+              <button type="submit">Salvar avisos</button>
+            </form>
+          </details>
+          <form method="post" action="{{ url_for('testar_telegram') }}" class="notification-card">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <button type="submit">TESTAR TELEGRAM</button>
+          </form>
+          <section class="card config-section">
+            <h3>Outras configurações</h3>
+            <p role="status">{{ 'Telegram configurado ✅' if telegram_configured else 'Telegram não configurado' }}</p>
+            {% if notification_error %}<p class="message" role="alert">Erro ao ler configurações: {{ notification_error }}</p>{% endif %}
+            {% for warning in config_warnings %}<p class="message" role="status">{{ warning }}</p>{% endfor %}
+          </section>
+          <section class="card config-section" aria-labelledby="password-heading">
+            <h3 id="password-heading">Alterar senha</h3>
+            <form method="post" action="{{ url_for('configuration') }}">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <input type="hidden" name="action" value="change_password">
+              <label for="current_password">Senha atual</label>
+              <input id="current_password" name="current_password" type="password" autocomplete="current-password" required>
+              <label for="new_password">Nova senha</label>
+              <input id="new_password" name="new_password" type="password" autocomplete="new-password" required>
+              <label for="confirm_password">Confirmar nova senha</label>
+              <input id="confirm_password" name="confirm_password" type="password" autocomplete="new-password" required>
+              <button type="submit">Alterar senha</button>
+            </form>
+          </section>
+        {% elif panel_page == 'clips' %}
+          <div id="content">
+            <div class="banner">
+              <small>SEU ESTÚDIO DIGITAL</small>
+              <h1>Meus cortes</h1>
+              <p>{{ current_folder_name or 'Pasta selecionada' }} · até quatro vídeos do dia, com prévia e horários de postagem.</p>
+            </div>
+            {% if error %}<div class="message" role="alert">{{ error }}</div>{% endif %}
+            {% if not drive_link_saved %}
+              <section class="card">
+                <h3>Configure a pasta do Google Drive</h3>
+                <p>Salve a pasta principal nas Configurações para preparar os vídeos do dia.</p>
+                <a class="connection-link" href="{{ url_for('configuration') }}">Abrir Configurações</a>
+              </section>
+            {% elif not current_folder_id %}
+              <section class="card">
+                <h3>Escolha uma pasta</h3>
+                <p>Volte para Home e selecione a pasta que deseja analisar.</p>
+              </section>
+            {% elif not automatic_schedule %}
+              <section class="card">
+                <h3>Preparar prévia de hoje</h3>
+                <p>O painel vai analisar a pasta e preparar até quatro vídeos distintos para 08:00, 12:30, 18:00 e 21:00.</p>
+                <form method="post" action="{{ url_for('agendamento_page') }}">
+                  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                  <input type="hidden" name="action" value="automatico">
+                  <input type="hidden" name="folder_id" value="{{ current_folder_id }}">
+                  <input type="hidden" name="path" value="{{ path_string }}">
+                  <button type="submit">Analisar e preparar vídeos</button>
+                </form>
+              </section>
+            {% else %}
+              <div id="clips-feed" aria-live="polite"></div>
+            {% endif %}
+          </div>
+        {% elif panel_page == 'stats' %}
+          <div class="banner">
+            <small>SEU ESTÚDIO DIGITAL</small>
+            <h1>Estatísticas reais</h1>
+            <p>Dados consultados no Google Drive e no histórico do painel.</p>
+          </div>
+          {% if error %}<div class="message" role="alert">{{ error }}</div>{% endif %}
+          {% if view %}
+            <div class="grid">
+              <section class="card"><small>Total de cortes</small><div class="metric">{{ panel_stats.videos }}</div></section>
+              <section class="card"><small>Pastas encontradas</small><div class="metric">{{ panel_stats.folders }}</div></section>
+              <section class="card"><small>Marcados como postados</small><div class="metric">{{ panel_stats.posted }}</div></section>
+            </div>
+          {% else %}
+            <section class="card"><p>Salve uma pasta do Google Drive em Configurações para carregar estatísticas reais.</p></section>
+          {% endif %}
+        {% else %}
+          <div class="banner">
+            <small>SEU ESTÚDIO DIGITAL</small>
+            <h1>Home</h1>
+            <p>Pastas do Google Drive conectadas ao seu painel.</p>
+          </div>
+          {% if error %}<div class="message" role="alert">{{ error }}</div>{% endif %}
+          {% if view %}
+            <div class="grid">
+              <section class="card"><small>Total de cortes</small><div class="metric">{{ panel_stats.videos }}</div></section>
+              <section class="card"><small>Pastas encontradas</small><div class="metric">{{ panel_stats.folders }}</div></section>
+              <section class="card"><small>Marcados como postados</small><div class="metric">{{ panel_stats.posted }}</div></section>
+            </div>
+            <section class="card">
+              <div class="row"><h3>{{ view.folder_name }}</h3><small>{{ view.video_count }} vídeo(s)</small></div>
+              {% if view.folders %}
+                <div class="folder-grid">
+                  {% for folder in view.folders %}
+                    <a class="folder-card" href="{{ url_for('dashboard', page='clips', path=path_string ~ ',' ~ folder.id) }}">
+                      <span class="folder-icon" aria-hidden="true">▰</span>
+                      <h3>{{ folder.name }}</h3>
+                      <small>{{ folder.video_count }} vídeo(s) · abrir em Meus cortes</small>
+                    </a>
+                  {% endfor %}
+                </div>
+              {% elif view.video_count %}
+                <div class="folder-grid">
+                  <a class="folder-card" href="{{ url_for('dashboard', page='clips', path=path_string) }}">
+                    <span class="folder-icon" aria-hidden="true">▰</span>
+                    <h3>{{ view.folder_name }}</h3>
+                    <small>{{ view.video_count }} vídeo(s) · abrir em Meus cortes</small>
+                  </a>
+                </div>
+              {% else %}
+                <p>Nenhuma pasta ou vídeo foi encontrado.</p>
+              {% endif %}
+            </section>
+          {% else %}
+            <section class="card">
+              <h3>Nenhuma pasta principal configurada</h3>
+              <p>Adicione o link do Google Drive em Configurações para carregar as pastas reais.</p>
+              <a class="connection-link" href="{{ url_for('configuration') }}">Abrir Configurações</a>
+            </section>
+          {% endif %}
+        {% endif %}
+      </main>
+    </div>
+    {% if panel_page == 'clips' and automatic_schedule and automatic_script %}
+      {{ automatic_script|safe }}
+    {% endif %}
+  {% endif %}
+</body>
+</html>

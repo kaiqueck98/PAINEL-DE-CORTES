@@ -718,11 +718,11 @@ def get_csrf_token():
 
 
 def configured_login_username():
-    return os.environ.get("LOGIN_USER", "").strip() or "admin"
+    return os.environ.get("LOGIN_USER", "").strip()
 
 
 def configured_login_password():
-    return os.environ.get("LOGIN_PASS") or "diverso123"
+    return os.environ.get("LOGIN_PASS", "")
 
 
 def load_login_password_hash():
@@ -766,17 +766,19 @@ def login_password_matches(password):
             raise LoginConfigurationError(
                 "A senha salva está inválida. Corrija a configuração de login."
             ) from exc
-    return secrets.compare_digest(
+    configured_password = configured_login_password()
+    return bool(configured_password) and secrets.compare_digest(
         password.encode("utf-8"),
-        configured_login_password().encode("utf-8"),
+        configured_password.encode("utf-8"),
     )
 
 
 def login_credentials_match(username, password):
+    configured_username = configured_login_username()
     username_matches = secrets.compare_digest(
         username.encode("utf-8"),
-        configured_login_username().encode("utf-8"),
-    )
+        configured_username.encode("utf-8"),
+    ) and bool(configured_username)
     password_matches = login_password_matches(password)
     return username_matches and password_matches
 
@@ -854,7 +856,8 @@ def login():
         return redirect(url_for("dashboard"))
 
     return render_template(
-        "CiberClips.html",
+        "CiberClips_Painel.html",
+        authenticated=False,
         csrf_token=get_csrf_token(),
         error=None,
     )
@@ -885,7 +888,8 @@ def login_submit():
     except LoginConfigurationError as exc:
         app.logger.error("Falha ao validar login: %s", exc)
         return render_template(
-            "CiberClips.html",
+            "CiberClips_Painel.html",
+            authenticated=False,
             csrf_token=get_csrf_token(),
             error="Não foi possível validar o login. Tente novamente.",
         ), 503
@@ -897,7 +901,8 @@ def login_submit():
         return redirect(url_for("dashboard"))
 
     return render_template(
-        "CiberClips.html",
+        "CiberClips_Painel.html",
+        authenticated=False,
         csrf_token=get_csrf_token(),
         error="Usuário ou senha inválidos.",
     )
@@ -1105,8 +1110,17 @@ def index():
     view = None
     error = None
     folder_link = ""
+    drive_folder_value = ""
     dashboard_view = request.endpoint == "dashboard"
     configuration_view = request.endpoint == "configuration"
+    legacy_folder_view = (
+        dashboard_view
+        and "page" not in request.args
+        and bool(request.args.get("path"))
+    )
+    panel_page = "settings" if configuration_view else request.args.get("page", "home")
+    if panel_page not in {"home", "clips", "stats"}:
+        panel_page = "home"
     notification_error = ""
     notification_values = {}
     telegram_configured = False
@@ -1115,10 +1129,14 @@ def index():
     drive_settings_error = ""
     submitted_folder_link = False
     path_ids = []
+    posted_video_ids = set()
     sort_order = ""
     good_filter = "all"
     posted_filter = "all"
     folder_model = {}
+    automatic_schedule = None
+    automatic_script = ""
+    panel_stats = {"videos": 0, "folders": 0, "posted": 0}
 
     if configuration_view and request.method == "GET":
         settings, notification_error = notification_settings_with_status()
@@ -1134,9 +1152,11 @@ def index():
             settings, notification_error
         )
         try:
-            drive_link_saved = bool(load_drive_folder_link())
+            drive_folder_value = load_drive_folder_link()
+            drive_link_saved = bool(drive_folder_value)
         except AutomationSettingsError as exc:
             drive_settings_error = str(exc)
+            drive_folder_value = ""
 
     if configuration_view and request.method == "POST":
         csrf_token = session.get("csrf_token", "")
@@ -1269,6 +1289,14 @@ def index():
             good_video_ids = load_good_video_ids()
             posted_video_ids = load_posted_video_ids()
             social_posts = load_social_posts()
+            posted_video_ids.update(
+                video_id
+                for video_id, platforms in social_posts.items()
+                if any(
+                    platform_post.get("status") == "posted"
+                    for platform_post in platforms.values()
+                )
+            )
             folder_model = load_folder_models().get(path_ids[-1], {})
             ordered_videos = sorted(view["videos"], key=lambda video: video.get("name", "").casefold())
             fallback_numbers = {
@@ -1333,8 +1361,43 @@ def index():
             view = None
             error = str(exc)
 
+    if dashboard_view and panel_page == "clips" and path_ids:
+        try:
+            schedules = AUTPOST_STORE.list_schedules()
+            automatic_schedule = next(
+                (
+                    schedule for schedule in schedules
+                    if schedule["folder_id"] == path_ids[-1]
+                    and schedule["status"] != "cancelled"
+                ),
+                None,
+            )
+            if automatic_schedule:
+                progress_url = url_for(
+                    "progresso_automatico",
+                    schedule_id=automatic_schedule["id"],
+                )
+                automatic_script = TITLE_EDITOR_SCRIPT.replace(
+                    "__CONTENT_ENDPOINT__", progress_url
+                ).replace(
+                    "__COVER_ENDPOINT__",
+                    url_for("automatic_cover", sha256="SHA"),
+                )
+        except autopost.AutopostStoreError as exc:
+            error = error or str(exc)
+
+    drive_link_saved = drive_link_saved or bool(folder_link)
+    if view:
+        panel_stats["videos"] = int(view.get("video_count", len(view.get("videos", []))))
+        panel_stats["folders"] = len(view.get("folders", []))
+        all_videos = view.get("all_videos", view.get("videos", []))
+        panel_stats["posted"] = sum(
+            1 for video in all_videos if video.get("id") in posted_video_ids
+        )
+
     return render_template(
-        "index.html",
+        "index.html" if legacy_folder_view else "CiberClips_Painel.html",
+        authenticated=True,
         view=view,
         path_string=",".join(path_ids),
         parent_path_string=",".join(path_ids[:-1]),
@@ -1353,6 +1416,13 @@ def index():
         config_warnings=config_warnings,
         drive_link_saved=drive_link_saved,
         drive_settings_error=drive_settings_error,
+        drive_folder_value=drive_folder_value,
+        panel_page=panel_page,
+        current_folder_name=view["folder_name"] if view else "",
+        panel_stats=panel_stats,
+        automatic_schedule=automatic_schedule,
+        automatic_script=automatic_script,
+        current_folder_id=path_ids[-1] if path_ids else "",
     )
 
 
@@ -2670,7 +2740,9 @@ def prepare_schedule_content(schedule_id):
         used_ids, _ = AUTPOST_STORE.used_content()
         blocked.update(used_ids)
         candidates = select_analysis_candidates(
-            view.get("all_videos", []), blocked, schedule["videos_per_day"]
+            view.get("all_videos", []),
+            blocked,
+            max(8, schedule["videos_per_day"] * 2),
         )
         if not candidates:
             raise RuntimeError(
@@ -2713,7 +2785,11 @@ def run_schedule_slot(schedule_id, slot_time):
     now_text = now.isoformat(timespec="seconds")
     claimed = False
     try:
-        reviews = AUTPOST_STORE.reviews(schedule_id)
+        run_date = schedule_now().strftime("%Y-%m-%d")
+        reviews = [
+            review for review in AUTPOST_STORE.reviews(schedule_id)
+            if review["run_date"] == run_date
+        ]
         review = reviews[0] if reviews else None
         if review and (review['status'] != 'confirmed' or review['target_date'] != run_date):
             return
@@ -3062,8 +3138,8 @@ TITLE_EDITOR_SCRIPT = r"""
   progressMessage.textContent = 'Aguardando início da análise...';
   progressCard.append(progressHeading, progressBar, progressPercent, progressMessage);
   host.append(progressCard);
-  const body = document.createElement('div'); host.append(body);
-  (document.querySelector('main') || document.body).append(host);
+  const body = document.createElement('div'); body.className = 'clip-grid'; host.append(body);
+  (document.getElementById('clips-feed') || document.querySelector('main') || document.body).append(host);
   const previewModal = document.createElement('div');
   previewModal.className = 'video-preview-modal';
   previewModal.hidden = true;
@@ -3087,13 +3163,12 @@ TITLE_EDITOR_SCRIPT = r"""
   previewPlayer.preload = 'metadata';
   previewPlayer.playsInline = true;
   const previewJapanese = document.createElement('p');
-  const previewTranslation = document.createElement('p');
   const closePreviewButton = document.createElement('button');
   closePreviewButton.type = 'button';
   closePreviewButton.className = 'video-preview-close-button';
   closePreviewButton.textContent = 'Fechar';
   previewHeader.append(previewTitle, closePreviewX);
-  previewDialog.append(previewHeader, previewPlayer, previewJapanese, previewTranslation, closePreviewButton);
+  previewDialog.append(previewHeader, previewPlayer, previewJapanese, closePreviewButton);
   previewModal.append(previewDialog);
   document.body.append(previewModal);
   let previewOpener = null;
@@ -3165,8 +3240,6 @@ TITLE_EDITOR_SCRIPT = r"""
           previewTitle.textContent = copy.title || 'Título indisponível';
           previewJapanese.textContent = 'Descrição (japonês): '
             + (copy.description_japanese || copy.japanese?.description_japanese || 'Indisponível');
-          previewTranslation.textContent = 'Tradução (português): '
-            + (copy.description_translation || copy.japanese?.description_translation || 'Indisponível');
           previewPlayer.src = '__COVER_ENDPOINT__'.replace('SHA', video.sha256)
             + '?video=1&revision=' + encodeURIComponent(revision || '');
           previewModal.hidden = false;
@@ -3207,7 +3280,7 @@ TITLE_EDITOR_SCRIPT = r"""
       const slotTimes = ['08:00', '12:30', '18:00', '21:00'];
       function renderVideoCard(video, index, container, revision, complete, review = null, onApprove = null) {
         const card = document.createElement('article');
-        card.className = 'card';
+        card.className = 'card clip-card';
         const copy = video.content || {};
         if (video.thumbnail && video.sha256) {
           const img = document.createElement('img');
@@ -3285,14 +3358,15 @@ TITLE_EDITOR_SCRIPT = r"""
       const currentReview = (data.reviews || []).find(item =>
         currentDay && item.run_date === currentDay.run_date
           && item.schedule_id === currentDay.schedule_id
-      ) || (!currentDay ? (data.reviews || [])[0] : null);
+      ) || null;
       if (currentReview) {
         const review = currentReview;
-        const section = document.createElement('section'); section.className = 'card';
+        const section = document.createElement('section'); section.className = 'card clip-review';
         const header = document.createElement('h3');
         header.textContent = review.status === 'confirmed' ? 'Lote confirmado · ' + review.target_date : 'Prévia — aprove os quatro vídeos';
         section.append(header);
         const notice = document.createElement('p'); notice.setAttribute('role', 'status'); section.append(notice);
+        const videoGrid = document.createElement('div'); videoGrid.className = 'clip-grid'; section.append(videoGrid);
         async function act(action, video, button) {
           editing=true; button.disabled = true; notice.textContent = 'Processando…';
           try {
@@ -3306,7 +3380,7 @@ TITLE_EDITOR_SCRIPT = r"""
         const selectedVideos = review.state.videos.slice(0, 4);
         for (const [index, video] of selectedVideos.entries()) {
           renderVideoCard(
-            video, index, section, review.revision, true, review,
+            video, index, videoGrid, review.revision, true, review,
             (item, button) => act('approve', item, button)
           );
         }
@@ -3328,7 +3402,9 @@ TITLE_EDITOR_SCRIPT = r"""
           renderVideoCard(video, index, body, currentDay?.updated || '', analysisComplete);
         }
       }
-    } catch (error) { body.textContent = error.message; }
+    } catch (error) {
+      body.textContent = 'Não foi possível carregar os cortes agora. Tente novamente em instantes.';
+    }
     finally { setTimeout(refreshContent, 5000); }
   }
   refreshContent();
@@ -3830,8 +3906,28 @@ def progresso_automatico():
     if not token or not supplied or not secrets.compare_digest(token, supplied):
         return jsonify(error="Atualize a página para acompanhar o progresso."), 403
     try:
-        content = AUTPOST_STORE.content_overview(schedule_now().strftime("%Y-%m-%d"))
-        reviews = AUTPOST_STORE.reviews()
+        schedule_id = request.args.get("schedule_id", "").strip()
+        if schedule_id:
+            if not re.fullmatch(r"[A-Za-z0-9_-]+", schedule_id):
+                return jsonify(error="Agendamento inválido."), 400
+            day, selected_videos = AUTPOST_STORE.get_day(
+                schedule_id, schedule_now().strftime("%Y-%m-%d")
+            )
+            content = {
+                "days": [
+                    {key: value for key, value in day.items() if key != "lease"}
+                ] if day else [],
+                "videos": selected_videos,
+            }
+            reviews = AUTPOST_STORE.reviews(schedule_id)
+            history = [
+                row for row in AUTPOST_STORE.list_history(40)
+                if row["schedule_id"] == schedule_id
+            ]
+        else:
+            content = AUTPOST_STORE.content_overview(schedule_now().strftime("%Y-%m-%d"))
+            reviews = AUTPOST_STORE.reviews()
+            history = AUTPOST_STORE.list_history(40)
         for report in content['videos']:
             report['preview_available'] = bool(
                 report.get('prepared_path') and os.path.isfile(report['prepared_path'])
@@ -3845,7 +3941,7 @@ def progresso_automatico():
                 )
                 for key in ('prepared_path', 'base_prepared_path', 'analysis_frames'):
                     report.pop(key, None)
-        return jsonify(history=AUTPOST_STORE.list_history(40), warnings=automatic_warnings(),
+        return jsonify(history=history, warnings=automatic_warnings(),
                        content=content, reviews=reviews, notifications=notification_overview())
     except autopost.AutopostStoreError as exc:
         return jsonify(error=str(exc)), 503
@@ -3909,6 +4005,9 @@ def automatic_cover(sha256):
 
 @app.route("/agendamento", methods=["GET", "POST"])
 def agendamento_page():
+    if request.method == "GET":
+        get_csrf_token()
+        return redirect(url_for("dashboard", page="clips"))
     erro = None
     ok = None
     automatic_post = (
@@ -3925,12 +4024,32 @@ def agendamento_page():
             try:
                 if action in {"criar", "automatico"}:
                     folder_link = load_drive_folder_link()
-                    if not folder_link:
+                    root_folder_id = extract_folder_id(folder_link) if folder_link else ""
+                    selected_path = request.form.get("path", "").strip()
+                    selected_path_ids = (
+                        parse_folder_path(selected_path) if selected_path else []
+                    )
+                    requested_folder_id = request.form.get("folder_id", "").strip()
+                    if requested_folder_id:
+                        if not re.fullmatch(r"[A-Za-z0-9_-]+", requested_folder_id):
+                            raise ValueError("ID de pasta inválido.")
+                        if (
+                            not root_folder_id
+                            or not selected_path_ids
+                            or selected_path_ids[0] != root_folder_id
+                            or selected_path_ids[-1] != requested_folder_id
+                        ):
+                            raise ValueError("A pasta selecionada não pertence à pasta principal.")
+                        folder_id = requested_folder_id
+                    elif folder_link:
+                        folder_id = extract_folder_id(folder_link)
+                    else:
                         raise ValueError(
                             "Salve a pasta principal do Google Drive em Configuração."
                         )
-                    folder_id = extract_folder_id(folder_link)
                     api_key = os.environ.get("DRIVE_API_KEY", "").strip()
+                    if not api_key:
+                        raise ValueError("Configure DRIVE_API_KEY para analisar a pasta.")
                     folder_name = get_folder_name(folder_id, api_key)
                     times_raw = request.form.get("times", "08:00, 12:30, 18:00, 21:00")
                     times = [t.strip() for t in times_raw.replace("\n", ",").split(",") if t.strip()]
@@ -3984,7 +4103,13 @@ def agendamento_page():
             flash(erro, "error")
         elif ok:
             flash(ok, "success")
-        return redirect(url_for("agendamento_page"))
+        path = request.form.get("path", "").strip()
+        if not path:
+            try:
+                path = extract_folder_id(load_drive_folder_link())
+            except (ValueError, AutomationSettingsError):
+                path = ""
+        return redirect(url_for("dashboard", page="clips", path=path))
     try:
         schedules = AUTPOST_STORE.list_schedules()
     except Exception as exc:

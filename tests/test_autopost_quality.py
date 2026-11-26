@@ -516,7 +516,7 @@ class ScreenTests(StoreTests):
 
         response = client.get("/dashboard")
         self.assertEqual(response.status_code, 200)
-        self.assertIn("<h1>Dashboard</h1>", response.get_data(as_text=True))
+        self.assertIn("<h1>Home</h1>", response.get_data(as_text=True))
         load_link.assert_called_once_with()
         load_link.reset_mock()
 
@@ -551,6 +551,7 @@ class ScreenTests(StoreTests):
             response = client.get("/dashboard")
         page = response.get_data(as_text=True)
         self.assertEqual(response.status_code, 200)
+        self.assertIn("<h1>Home</h1>", page)
         self.assertIn("50 MIL cortes virais", page)
         self.assertNotIn(folder_link, page)
 
@@ -1016,12 +1017,12 @@ class ScreenTests(StoreTests):
                 response = client.post(
                     '/agendamento',
                     data={'action': 'automatico', 'csrf_token': 'test-token'},
-                    follow_redirects=True,
                 )
-                self.assertEqual(response.status_code, 200)
-                self.assertIn('RODAR AUTOMÁTICO', response.get_data(as_text=True))
-                self.assertNotIn('<input name="folder_link"', response.get_data(as_text=True))
-                self.assertIn('Análise iniciada.', response.get_data(as_text=True))
+                self.assertEqual(response.status_code, 302)
+                self.assertEqual(
+                    response.location,
+                    '/dashboard?page=clips&path=folder',
+                )
         schedules = self.store.list_schedules()
         self.assertEqual(len(schedules), 1)
         self.assertEqual(schedules[0]['folder_id'], 'folder')

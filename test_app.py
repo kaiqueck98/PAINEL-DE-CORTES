@@ -61,6 +61,7 @@ class PanelRouteTests(unittest.TestCase):
         self.assertIn(b'name="password"', response.data)
         self.assertIn(b">Entrar no painel \xe2\x86\x92</button>", response.data)
         self.assertIn(b'action="/login"', response.data)
+        self.assertIn("O futuro dos cortes começa aqui.".encode(), response.data)
         self.assertNotIn(b"Interface demonstrativa", response.data)
         self.assertNotIn(b"Dashboard", response.data)
         self.assertNotIn(b"Link da pasta do Google Drive", response.data)
@@ -103,9 +104,10 @@ class PanelRouteTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn(b"Cortes", response.data)
         self.assertIn(b"2507 v", response.data)
+        self.assertIn(b"page=clips", response.data)
         self.assertNotIn(b"N\xc3\xa3o mostrar na raiz.mp4", response.data)
 
-    def test_folder_view_shows_subfolders_before_direct_videos_and_back_link(self):
+    def test_home_folder_opens_automatic_cuts_for_that_folder(self):
         view = {
             "folder_name": "Cortes",
             "folders": [{"id": "nested123", "name": "Subcortes", "video_count": 3}],
@@ -136,43 +138,14 @@ class PanelRouteTests(unittest.TestCase):
                 "video720": {"tiktok": {"status": "inbox"}},
             },
         ):
-            response = self.client.get("/dashboard?path=root123,child123")
+            response = self.client.get("/dashboard?page=home&path=root123,child123")
 
         self.assertEqual(response.status_code, 200)
-        self.assertIn(b"Voltar para as pastas", response.data)
         self.assertIn(b"Subcortes", response.data)
-        self.assertIn(b"Corte pronto.mp4", response.data)
-        self.assertIn(b"1:30", response.data)
-        self.assertIn(b"Resolu\xc3\xa7\xc3\xa3o: 360p", response.data)
-        self.assertIn(b"Qualidade baixa", response.data)
-        self.assertIn(b"Qualidade boa", response.data)
-        self.assertIn(b"Melhorar qualidade", response.data)
-        self.assertEqual(response.data.count(b"Melhorar qualidade"), 1)
-        self.assertIn(b"Ver s\xc3\xb3 os bons", response.data)
-        self.assertIn(b"Para postar", response.data)
-        self.assertIn(b"J\xc3\xa1 postados", response.data)
-        self.assertIn(b"Baixar v\xc3\xaddeo", response.data)
-        self.assertIn(b"Marcar como postado", response.data)
-        self.assertIn(b"3 sugest\xc3\xb5es de t\xc3\xadtulo", response.data)
-        self.assertIn(b"T\xc3\xadtulo edit\xc3\xa1vel para YouTube/TikTok", response.data)
-        self.assertIn(b"Copiar t\xc3\xadtulo + hashtags", response.data)
-        self.assertIn(b"Ver original", response.data)
-        self.assertIn(b"Ver melhorado", response.data)
-        self.assertIn(b"Assista ao v\xc3\xaddeo melhorado at\xc3\xa9 o fim", response.data)
-        self.assertIn(b"Baixar v\xc3\xaddeo melhorado", response.data)
-        self.assertIn(b"Enviar rascunho ao TikTok", response.data)
-        self.assertIn(b"Postar no YouTube Shorts", response.data)
-        self.assertNotIn(b"Privacidade no TikTok", response.data)
-        self.assertIn(b"Postado no TikTok", response.data)
-        self.assertIn(b"Enviado \xc3\xa0 caixa de entrada do TikTok", response.data)
-        self.assertIn(b"Rascunho enviado. Abra a notifica\xc3\xa7\xc3\xa3o no TikTok", response.data)
-        self.assertIn(b'class="video posted"', response.data)
-        self.assertIn(b"Modelo de t\xc3\xadtulo", response.data)
-        self.assertIn(b"Modelo de hashtags", response.data)
-        self.assertIn(b"Salvar modelo", response.data)
-        self.assertLess(response.data.index(b"Subcortes"), response.data.index(b"Corte pronto.mp4"))
+        self.assertIn(b"page=clips&amp;path=root123,child123,nested123", response.data)
+        self.assertNotIn(b"Corte pronto.mp4", response.data)
 
-    def test_score_sorting_and_good_filter(self):
+    def test_statistics_use_real_drive_and_posted_counts(self):
         view = {
             "folder_name": "Cortes",
             "folders": [],
@@ -190,18 +163,17 @@ class PanelRouteTests(unittest.TestCase):
         }
         with patch.dict(os.environ, {"DRIVE_API_KEY": "test-key"}), patch.object(
             app, "get_folder_view", side_effect=lambda *_: deepcopy(view)
-        ), patch.object(app, "load_good_video_ids", return_value={"best123"}):
-            filtered = self.client.get(
-                "/dashboard?path=root123,child123&sort_order=score&good_filter=good"
-            )
-            sorted_all = self.client.get(
-                "/dashboard?path=root123,child123&sort_order=score&good_filter=all"
+        ), patch.object(app, "load_good_video_ids", return_value={"best123"}), patch.object(
+            app, "load_posted_video_ids", return_value={"best123"}
+        ), patch.object(app, "load_social_posts", return_value={}):
+            response = self.client.get(
+                "/dashboard?page=stats&path=root123,child123"
             )
 
-        self.assertIn(b"Corte final pronto.mp4", filtered.data)
-        self.assertNotIn(b"Teste.mp4", filtered.data)
-        self.assertLess(sorted_all.data.index(b"Corte final pronto.mp4"), sorted_all.data.index(b"Teste.mp4"))
-        self.assertIn(b"9.6/10", sorted_all.data)
+        self.assertIn(b"Estat\xc3\xadsticas reais", response.data)
+        self.assertIn(b"Total de cortes</small><div class=\"metric\">2", response.data)
+        self.assertIn(b"Pastas encontradas</small><div class=\"metric\">0", response.data)
+        self.assertIn(b"Marcados como postados</small><div class=\"metric\">1", response.data)
 
     def test_mark_good_persists_video_id_to_json_file(self):
         view = {
@@ -453,7 +425,7 @@ class PanelRouteTests(unittest.TestCase):
         self.assertEqual(home_response.status_code, 302)
         self.assertEqual(home_response.location, "/dashboard")
         self.assertEqual(dashboard_response.status_code, 200)
-        self.assertIn(b"Dashboard", dashboard_response.data)
+        self.assertIn(b"Home", dashboard_response.data)
 
     def test_connected_social_accounts_show_status(self):
         with patch.object(
