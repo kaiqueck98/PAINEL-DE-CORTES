@@ -99,6 +99,28 @@
     .library-controls-grid input,.library-controls-grid select{margin-bottom:0}
     .library-count{margin:14px 0 0}
     #clips-load-more{display:block;margin:20px auto}
+    .stats-toolbar{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:18px}
+    .stats-toolbar form{margin:0}
+    .stats-toolbar select{width:auto;min-width:130px;margin:0}
+    .stats-chart-wrap{overflow-x:auto;padding-bottom:8px}
+    .stats-chart-bars{display:flex;align-items:stretch;gap:6px;min-width:620px;height:230px;padding:10px 4px 0}
+    .stats-chart-column{display:flex;flex:1;min-width:14px;flex-direction:column;justify-content:flex-end;align-items:center;gap:6px}
+    .stats-chart-track{display:flex;align-items:flex-end;justify-content:center;width:100%;height:190px;border-bottom:1px solid #343044}
+    .stats-chart-stack{display:flex;flex-direction:column-reverse;width:min(22px,90%);min-height:0;border-radius:5px 5px 0 0;overflow:hidden}
+    .stats-chart-bar{display:block;min-height:0;background:#8b5cf6}
+    .stats-chart-bar.instagram{background:#c4b5fd}
+    .stats-chart-gap{width:55%;height:3px;border-bottom:2px dashed #625a73}
+    .stats-chart-column small{font-size:10px;white-space:nowrap}
+    .stats-chart-legend{display:flex;gap:16px;flex-wrap:wrap;margin-top:10px;color:#bcb6ce}
+    .stats-chart-legend span{display:inline-flex;align-items:center;gap:6px}
+    .stats-chart-legend i{width:10px;height:10px;border-radius:3px;background:#8b5cf6}
+    .stats-chart-legend i.instagram{background:#c4b5fd}
+    .stats-table-wrap{overflow-x:auto}
+    .stats-table{width:100%;border-collapse:collapse;min-width:560px}
+    .stats-table th,.stats-table td{padding:12px 10px;border-bottom:1px solid #292538;text-align:left;vertical-align:top}
+    .stats-table th{color:#bcb6ce;font-size:.85rem}
+    .stats-table td:first-child{overflow-wrap:anywhere;max-width:420px}
+    .stats-empty{padding:20px;border:1px dashed #343044;border-radius:12px;color:#a6a0b6}
     .video-preview-modal{position:fixed;inset:0;z-index:1000;display:grid;place-items:center;padding:18px;background:rgba(0,0,0,.82)}
     .video-preview-modal[hidden]{display:none}
     .video-preview-dialog{width:min(900px,100%);max-height:calc(100vh - 36px);overflow:auto;padding:22px;border:1px solid #485572;border-radius:16px;background:#15131e}
@@ -218,7 +240,7 @@
           </section>
 
           <section class="card config-section" aria-labelledby="social-heading">
-            <h3 id="social-heading">Conectar TikTok e YouTube</h3>
+            <h3 id="social-heading">Conectar redes sociais</h3>
             {% if social_token_error %}<div class="message" role="alert">{{ social_token_error }}</div>{% endif %}
             <nav class="social-connections" aria-label="Conectar redes sociais">
               <div class="connection-group">
@@ -229,6 +251,17 @@
                   <form class="connection-disconnect-form" method="post" action="{{ url_for('disconnect_social', platform='tiktok') }}">
                     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                     <button class="connection-link disconnected" type="submit" aria-label="Desconectar TikTok">Desconectar</button>
+                  </form>
+                {% endif %}
+              </div>
+              <div class="connection-group">
+                <a class="connection-link {% if instagram_connected %}connected{% else %}disconnected{% endif %}" href="{{ url_for('start_social_oauth', platform='instagram') }}">
+                  {% if instagram_connected %}Instagram conectado ✅{% else %}Conectar Instagram{% endif %}
+                </a>
+                {% if instagram_connected %}
+                  <form class="connection-disconnect-form" method="post" action="{{ url_for('disconnect_social', platform='instagram') }}">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                    <button class="connection-link disconnected" type="submit" aria-label="Desconectar Instagram">Desconectar</button>
                   </form>
                 {% endif %}
               </div>
@@ -362,19 +395,158 @@
         {% elif panel_page == 'stats' %}
           <div class="banner">
             <small>SEU ESTÚDIO DIGITAL</small>
-            <h1>Estatísticas reais</h1>
-            <p>Dados consultados no Google Drive e no histórico do painel.</p>
+            <h1>Estatísticas</h1>
+            <p>Métricas recebidas das APIs oficiais do TikTok e Instagram.</p>
           </div>
-          {% if error %}<div class="message" role="alert">{{ error }}</div>{% endif %}
-          {% if view %}
-            <div class="grid">
-              <section class="card"><small>Total de cortes</small><div class="metric">{{ panel_stats.videos }}</div></section>
-              <section class="card"><small>Pastas encontradas</small><div class="metric">{{ panel_stats.folders }}</div></section>
-              <section class="card"><small>Marcados como postados</small><div class="metric">{{ panel_stats.posted }}</div></section>
-            </div>
-          {% else %}
-            <section class="card"><p>Salve uma pasta do Google Drive em Configurações para carregar estatísticas reais.</p></section>
+          <div class="stats-toolbar">
+            <p id="social-stats-status" role="status">
+              {% if social_stats.updated_at %}Última coleta: {{ social_stats.updated_at }}{% elif social_stats.job.message %}{{ social_stats.job.message }}{% else %}Sem dados de contas conectadas.{% endif %}
+            </p>
+            <form method="post" action="{{ url_for('refresh_social_statistics') }}">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <button id="social-stats-refresh" type="submit"{% if social_stats.job.running %} disabled{% endif %}>Atualizar agora</button>
+            </form>
+          </div>
+          <div class="grid">
+            <section class="card"><small>Total de visualizações</small><div class="metric">{{ social_stats.totals.views }}</div></section>
+            <section class="card"><small>Total de curtidas</small><div class="metric">{{ social_stats.totals.likes }}</div></section>
+            <section class="card"><small>Total de comentários</small><div class="metric">{{ social_stats.totals.comments }}</div></section>
+            <section class="card"><small>Total de compartilhamentos</small><div class="metric">{{ social_stats.totals.shares }}</div></section>
+            <section class="card"><small>Seguidores</small><div class="metric">{{ social_stats.totals.followers }}</div></section>
+            <section class="card"><small>Taxa de engajamento</small><div class="metric">{{ social_stats.totals.engagement_rate }}</div></section>
+          </div>
+          {% if social_stats.job.errors %}
+            {% for platform, message in social_stats.job.errors.items() %}
+              <div class="message" role="alert">{{ platform|capitalize }}: {{ message }}</div>
+            {% endfor %}
           {% endif %}
+          <section class="card" aria-labelledby="social-stats-chart-title">
+            <div class="row">
+              <h3 id="social-stats-chart-title">Visualizações por dia</h3>
+              <div class="row">
+                <label for="social-stats-platform">Rede</label>
+                <select id="social-stats-platform">
+                  <option value="all">Todos</option>
+                  <option value="tiktok">TikTok</option>
+                  <option value="instagram">Instagram</option>
+                </select>
+                <label for="social-stats-period">Período</label>
+                <select id="social-stats-period">
+                  <option value="7">Últimos 7 dias</option>
+                  <option value="30">Últimos 30 dias</option>
+                </select>
+              </div>
+            </div>
+            <p>O Instagram mostra o histórico diário disponível na API. O TikTok fornece contadores acumulados; o histórico dele começa após a primeira coleta e o painel calcula a variação entre coletas.</p>
+            <div class="stats-chart-wrap"><div id="social-stats-chart" class="stats-chart-bars" role="img" aria-label="Gráfico de visualizações por dia"></div></div>
+            <div class="stats-chart-legend"><span><i></i>TikTok</span><span><i class="instagram"></i>Instagram</span></div>
+          </section>
+          <section class="card" aria-labelledby="social-stats-top-title">
+            <h3 id="social-stats-top-title">O povo mais gostou</h3>
+            {% if social_stats.top_videos %}
+              <div class="stats-table-wrap">
+                <table class="stats-table">
+                  <thead><tr><th>Vídeo</th><th>Rede</th><th>Curtidas</th><th>Visualizações</th><th>Pasta de origem</th></tr></thead>
+                  <tbody>
+                    {% for video in social_stats.top_videos %}
+                      <tr>
+                        <td>{% if video.permalink %}<a href="{{ video.permalink }}" target="_blank" rel="noopener noreferrer">{{ video.title }}</a>{% else %}{{ video.title }}{% endif %}</td>
+                        <td>{{ video.platform }}</td><td>{{ video.likes }}</td><td>{{ video.views }}</td><td>{{ video.folder }}</td>
+                      </tr>
+                    {% endfor %}
+                  </tbody>
+                </table>
+              </div>
+            {% elif social_stats.has_connected %}
+              <p class="stats-empty">A lista aparecerá depois da primeira leitura das publicações autorizadas.</p>
+            {% else %}
+              <p class="stats-empty">Conecte uma rede para ver as publicações com mais curtidas.</p>
+            {% endif %}
+          </section>
+          {% if not tiktok_connected or not instagram_connected %}
+            <section class="card">
+              <h3>Conecte suas contas para carregar métricas</h3>
+              <nav class="social-connections" aria-label="Conectar redes para estatísticas">
+                {% if not tiktok_connected %}<a class="connection-link disconnected" href="{{ url_for('start_social_oauth', platform='tiktok') }}">Conectar TikTok</a>{% endif %}
+                {% if not instagram_connected %}<a class="connection-link disconnected" href="{{ url_for('start_social_oauth', platform='instagram') }}">Conectar Instagram</a>{% endif %}
+              </nav>
+            </section>
+          {% endif %}
+          <script>
+            (() => {
+              const chart = document.getElementById('social-stats-chart');
+              const network = document.getElementById('social-stats-platform');
+              const period = document.getElementById('social-stats-period');
+              const series = {{ social_stats.chart_days|tojson }};
+              const connected = {{ social_stats.connected|tojson }};
+              function drawChart() {
+                const rows = series.slice(-Number(period.value));
+                const selected = network.value === 'all' ? connected : [network.value];
+                const values = rows.map(row => {
+                  const available = selected.filter(name => row[name] !== null && row[name] !== undefined);
+                  return available.length
+                    ? {total: available.reduce((sum, name) => sum + Number(row[name]), 0), networks: available}
+                    : null;
+                });
+                const max = Math.max(1, ...values.filter(Boolean).map(value => value.total));
+                chart.innerHTML = '';
+                rows.forEach((row, index) => {
+                  const column = document.createElement('div');
+                  column.className = 'stats-chart-column';
+                  const track = document.createElement('div');
+                  track.className = 'stats-chart-track';
+                  if (!values[index]) {
+                    const gap = document.createElement('span');
+                    gap.className = 'stats-chart-gap';
+                    gap.title = 'Sem coleta para este dia';
+                    track.append(gap);
+                  } else {
+                    const stack = document.createElement('div');
+                    stack.className = 'stats-chart-stack';
+                    values[index].networks.forEach(name => {
+                      const bar = document.createElement('span');
+                      bar.className = 'stats-chart-bar ' + name;
+                      const segment = Number(row[name]);
+                      bar.style.height = Math.max(2, segment / max * 100) + '%';
+                      bar.title = (name === 'tiktok' ? 'TikTok' : 'Instagram') + ': ' + segment.toLocaleString('pt-BR');
+                      stack.append(bar);
+                    });
+                    track.append(stack);
+                  }
+                  const date = document.createElement('small');
+                  date.textContent = row.date.slice(5);
+                  column.append(track, date);
+                  chart.append(column);
+                });
+              }
+              network.addEventListener('change', drawChart);
+              period.addEventListener('change', drawChart);
+              drawChart();
+
+              const status = document.getElementById('social-stats-status');
+              const csrf = document.querySelector('[name="csrf_token"]')?.value || '';
+              let refreshTimer;
+              async function refreshStatus() {
+                try {
+                  const response = await fetch('{{ url_for("social_statistics_status") }}', {
+                    headers: {'X-CSRF-Token': csrf}, cache: 'no-store'
+                  });
+                  const job = await response.json();
+                  if (!response.ok) return;
+                  if (job.running) {
+                    status.textContent = job.message || 'Atualizando estatísticas...';
+                    refreshTimer = setTimeout(refreshStatus, 4000);
+                  } else if (job.completed_at) {
+                    status.textContent = job.message || 'Atualização concluída.';
+                    window.location.reload();
+                  }
+                } catch (_) {
+                  refreshTimer = setTimeout(refreshStatus, 7000);
+                }
+              }
+              {% if social_stats.job.running %}refreshTimer = setTimeout(refreshStatus, 1000);{% endif %}
+            })();
+          </script>
         {% else %}
           <div class="banner">
             <small>SEU ESTÚDIO DIGITAL</small>

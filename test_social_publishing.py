@@ -88,7 +88,10 @@ class SocialPublishingTests(unittest.TestCase):
         params = parse_qs(parsed.query)
         self.assertEqual(parsed.netloc, "www.tiktok.com")
         self.assertEqual(params["state"], ["state-value"])
-        self.assertEqual(params["scope"], ["user.info.basic,video.upload"])
+        self.assertEqual(
+            params["scope"],
+            ["user.info.basic,user.info.profile,user.info.stats,video.list,video.upload"],
+        )
         self.assertEqual(params["code_challenge"], [code_challenge])
         self.assertEqual(params["code_challenge_method"], ["S256"])
         self.assertEqual(
@@ -131,6 +134,30 @@ class SocialPublishingTests(unittest.TestCase):
         store_tokens.assert_called_once_with(
             "tiktok",
             {"access_token": "access", "refresh_token": "refresh"},
+        )
+
+    def test_instagram_authorization_requests_official_insights_permissions(self):
+        with patch.dict(
+            os.environ,
+            {
+                "META_APP_ID": "meta-app-id",
+                "META_APP_SECRET": "meta-app-secret",
+                "INSTAGRAM_REDIRECT_URI": "https://panel.example/oauth/instagram/callback",
+            },
+        ):
+            authorization = social_publishing.authorization_url("instagram", "state-value")
+
+        parsed = urlparse(authorization)
+        params = parse_qs(parsed.query)
+        self.assertEqual(parsed.netloc, "www.facebook.com")
+        self.assertEqual(params["state"], ["state-value"])
+        self.assertEqual(
+            params["scope"],
+            ["instagram_basic,instagram_manage_insights,pages_show_list,pages_read_engagement"],
+        )
+        self.assertEqual(
+            params["redirect_uri"],
+            ["https://panel.example/oauth/instagram/callback"],
         )
 
     def test_youtube_authorization_requests_offline_upload_permission(self):

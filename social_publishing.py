@@ -28,6 +28,9 @@ TIKTOK_API_BASE = "https://open.tiktokapis.com/v2"
 YOUTUBE_AUTHORIZE_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 YOUTUBE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 YOUTUBE_UPLOAD_URL = "https://www.googleapis.com/upload/youtube/v3/videos"
+META_API_VERSION = os.environ.get("META_GRAPH_API_VERSION", "v27.0").strip() or "v27.0"
+META_AUTHORIZE_URL = f"https://www.facebook.com/{META_API_VERSION}/dialog/oauth"
+META_TOKEN_URL = f"https://graph.facebook.com/{META_API_VERSION}/oauth/access_token"
 
 
 class SocialPublishingError(Exception):
@@ -98,7 +101,9 @@ def ensure_token_encryption_key(dotenv_path=None):
 
 
 def platform_display_name(platform):
-    return "TikTok" if platform == "tiktok" else "YouTube"
+    return {"tiktok": "TikTok", "youtube": "YouTube", "instagram": "Instagram"}.get(
+        platform, "Rede social"
+    )
 
 
 def _platform_config(platform, redirect_uri_override=None):
@@ -118,6 +123,24 @@ def _platform_config(platform, redirect_uri_override=None):
             or (redirect_uri_override or "").strip()
             or "http://localhost:5000/oauth/youtube/callback"
         )
+    elif platform == "instagram":
+        client_id = (
+            os.environ.get("META_APP_ID", "").strip()
+            or os.environ.get("FACEBOOK_APP_ID", "").strip()
+            or os.environ.get("INSTAGRAM_CLIENT_ID", "").strip()
+        )
+        client_secret = (
+            os.environ.get("META_APP_SECRET", "").strip()
+            or os.environ.get("FACEBOOK_APP_SECRET", "").strip()
+            or os.environ.get("INSTAGRAM_CLIENT_SECRET", "").strip()
+        )
+        redirect_uri = (
+            os.environ.get("INSTAGRAM_REDIRECT_URI", "").strip()
+            or os.environ.get("META_REDIRECT_URI", "").strip()
+            or os.environ.get("FACEBOOK_REDIRECT_URI", "").strip()
+            or (redirect_uri_override or "").strip()
+            or "http://localhost:5000/oauth/instagram/callback"
+        )
     else:
         raise SocialPublishingError("Plataforma de publicação inválida.")
 
@@ -131,6 +154,10 @@ def _platform_config(platform, redirect_uri_override=None):
         if not value
     ]
     if missing:
+        if platform == "instagram":
+            raise SocialPublishingError(
+                "Configure META_APP_ID e META_APP_SECRET como segredos do ambiente Oracle."
+            )
         raise SocialPublishingError(
             f"Configure as credenciais de {platform_display_name(platform)} no arquivo .env."
         )
@@ -205,7 +232,7 @@ def load_social_tokens():
     if not isinstance(payload, dict):
         raise SocialPublishingError("O arquivo de tokens sociais tem um formato inválido.")
     if any(
-        platform not in {"tiktok", "youtube"} or not isinstance(token_data, dict)
+        platform not in {"tiktok", "youtube", "instagram"} or not isinstance(token_data, dict)
         for platform, token_data in payload.items()
     ):
         raise SocialPublishingError("O arquivo de tokens sociais tem um formato inválido.")
@@ -248,7 +275,7 @@ def save_social_tokens(tokens):
 
 
 def delete_social_token(platform):
-    if platform not in {"tiktok", "youtube"}:
+    if platform not in {"tiktok", "youtube", "instagram"}:
         raise SocialPublishingError("Plataforma de publicação inválida.")
     with SOCIAL_TOKENS_LOCK:
         if _use_configured_token_backend() and _TOKEN_BACKEND.get("delete"):
@@ -288,7 +315,7 @@ def _extract_user_email(data, token_response=None):
 
 
 def store_authorized_tokens(platform, token_response):
-    if platform not in {"tiktok", "youtube"}:
+    if platform not in {"tiktok", "youtube", "instagram"}:
         raise SocialPublishingError("Plataforma de publicação inválida.")
     if platform == "tiktok":
         data = token_response.get("data", token_response)
@@ -303,6 +330,8 @@ def store_authorized_tokens(platform, token_response):
         tokens = load_social_tokens()
         previous = tokens.get(platform, {})
         refresh_token = data.get("refresh_token") or previous.get("refresh_token")
+        if platform == "instagram":
+            refresh_token = refresh_token or data.get("access_token")
         if not refresh_token:
             raise SocialPublishingError(
                 f"{platform_display_name(platform)} não forneceu um token de renovação. Tente conectar novamente."
@@ -312,12 +341,17 @@ def store_authorized_tokens(platform, token_response):
         except (TypeError, ValueError) as exc:
             raise SocialPublishingError("A plataforma retornou um prazo de token inválido.") from exc
         user_email = _extract_user_email(data, token_response)
+        profile_data = data.get("profile_data", previous.get("profile_data", {}))
+        if platform == "tiktok" and data.get("open_id"):
+            profile_data = {**(profile_data if isinstance(profile_data, dict) else {}),
+                            "account_id": data["open_id"]}
         tokens[platform] = {
             "access_token": data["access_token"],
             "refresh_token": refresh_token,
             "expires_at": time.time() + expires_in,
             "user_email": user_email if user_email is not None else previous.get("user_email"),
             "open_id": data.get("open_id", previous.get("open_id", "")),
+            "profile_data": profile_data if isinstance(profile_data, dict) else {},
         }
         save_social_tokens(tokens)
 
@@ -353,14 +387,14 @@ def authorization_url(platform, state, code_challenge=None, redirect_uri_overrid
         params = {
             "client_key": client_id,
             "response_type": "code",
-            "scope": "user.info.basic,video.upload",
+            "scope": "user.info.basic,user.info.profile,user.info.stats,video.list,video.upload",
             "redirect_uri": redirect_uri,
             "state": state,
             "code_challenge": code_challenge,
             "code_challenge_method": "S256",
         }
         base_url = TIKTOK_AUTHORIZE_URL
-    else:
+    elif platform == "youtube":
         params = {
             "client_id": client_id,
             "response_type": "code",
@@ -371,6 +405,15 @@ def authorization_url(platform, state, code_challenge=None, redirect_uri_overrid
             "prompt": "consent",
         }
         base_url = YOUTUBE_AUTHORIZE_URL
+    else:
+        params = {
+            "client_id": client_id,
+            "response_type": "code",
+            "scope": "instagram_basic,instagram_manage_insights,pages_show_list,pages_read_engagement",
+            "redirect_uri": redirect_uri,
+            "state": state,
+        }
+        base_url = META_AUTHORIZE_URL
     return f"{base_url}?{urlencode(params)}"
 
 
@@ -423,6 +466,46 @@ def exchange_authorization_code(
     client_id, client_secret, redirect_uri = _platform_config(
         platform, redirect_uri_override=redirect_uri_override
     )
+    if platform == "instagram":
+        short_token = _meta_oauth_exchange({
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "redirect_uri": redirect_uri,
+            "code": code,
+        })
+        if not short_token.get("access_token"):
+            raise SocialPublishingError("A Meta não retornou um token de acesso para o Instagram.")
+        long_token = _meta_oauth_exchange({
+            "grant_type": "fb_exchange_token",
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "fb_exchange_token": short_token["access_token"],
+        })
+        user_access_token = long_token.get("access_token")
+        if not user_access_token:
+            raise SocialPublishingError("A Meta não conseguiu prolongar o token do Instagram.")
+        from social_analytics import list_instagram_accounts
+
+        accounts = list_instagram_accounts(user_access_token)
+        preferred_username = os.environ.get("INSTAGRAM_ACCOUNT_USERNAME", "").strip().lstrip("@").casefold()
+        selected = next(
+            (account for account in accounts if account.get("username", "").casefold() == preferred_username),
+            accounts[0] if accounts else None,
+        )
+        if not selected:
+            raise SocialPublishingError(
+                "Não encontrei uma conta profissional do Instagram vinculada a uma Página do Facebook autorizada."
+            )
+        long_token["refresh_token"] = user_access_token
+        long_token["profile_data"] = {
+            "account_id": selected["account_id"],
+            "username": selected.get("username", ""),
+            "page_id": selected.get("page_id", ""),
+            "page_name": selected.get("page_name", ""),
+        }
+        store_authorized_tokens("instagram", long_token)
+        return long_token
+
     fields = {
         "code": code,
         "grant_type": "authorization_code",
@@ -455,8 +538,40 @@ def exchange_authorization_code(
     store_authorized_tokens(platform, token_response)
 
 
+def _meta_oauth_exchange(params):
+    status, _, body = _http_request(
+        f"{META_TOKEN_URL}?{urlencode(params)}",
+        headers={"Accept": "application/json"},
+        method="GET",
+    )
+    if not 200 <= status < 300:
+        raise SocialPublishingError(
+            _response_message(body, f"A autorização do Instagram retornou HTTP {status}.")
+        )
+    try:
+        payload = json.loads(body.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise SocialPublishingError("A Meta retornou uma resposta de autorização inválida.") from exc
+    if not isinstance(payload, dict) or payload.get("error"):
+        raise SocialPublishingError(
+            _response_message(body, "A Meta recusou a autorização do Instagram.")
+        )
+    return payload
+
+
 def _refresh_access_token(platform, refresh_token):
     client_id, client_secret, _ = _platform_config(platform)
+    if platform == "instagram":
+        refreshed = _meta_oauth_exchange({
+            "grant_type": "fb_exchange_token",
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "fb_exchange_token": refresh_token,
+        })
+        if not refreshed.get("access_token"):
+            raise SocialPublishingError("A Meta não renovou o token do Instagram.")
+        refreshed["refresh_token"] = refreshed["access_token"]
+        return refreshed
     if platform == "tiktok":
         fields = {
             "client_key": client_id,
@@ -509,7 +624,10 @@ def get_access_token(platform):
                 f"Conecte a conta do {platform_display_name(platform)} antes de publicar."
             )
         try:
-            expires_at = float(token_data.get("expires_at", 0))
+            stored_expiry = token_data.get("expires_at")
+            if platform == "instagram" and stored_expiry is None:
+                return token_data["access_token"]
+            expires_at = float(stored_expiry or 0)
         except (TypeError, ValueError) as exc:
             raise SocialPublishingError("O prazo do token salvo é inválido. Reconecte a conta.") from exc
         if expires_at > time.time() + 60:

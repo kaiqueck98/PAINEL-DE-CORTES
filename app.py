@@ -30,7 +30,7 @@ SOCIAL_TOKEN_ENCRYPTION_KEY_CONFIGURED = bool(
 )
 
 from flask import Flask, Response, flash, jsonify, redirect, render_template, render_template_string, request, send_file, session, stream_with_context, url_for
-from sqlalchemy import Column, DateTime, Integer, String, Text, create_engine
+from sqlalchemy import Column, DateTime, Integer, String, Text, UniqueConstraint, create_engine, inspect as sqlalchemy_inspect, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import declarative_base, sessionmaker
 from werkzeug.middleware.proxy_fix import ProxyFix
@@ -38,6 +38,7 @@ from werkzeug.security import check_password_hash, generate_password_hash
 from werkzeug.utils import secure_filename
 
 import social_publishing
+import social_analytics
 import autopost
 social_publishing.ensure_token_encryption_key(DOTENV_FILE)
 
@@ -85,6 +86,16 @@ CLIPS_LIBRARY_CACHE_TTL = 120
 AUTPOST_SCHEDULER = BackgroundScheduler(timezone=AUTPOST_TIMEZONE)
 AUTPOST_SCHEDULER_LOCK = threading.Lock()
 AUTPOST_SCHEDULER_STARTED = False
+SOCIAL_ANALYTICS_JOB_LOCK = threading.Lock()
+SOCIAL_ANALYTICS_JOB = {
+    "running": False,
+    "message": "",
+    "errors": {},
+    "started_at": None,
+    "completed_at": None,
+}
+SOCIAL_ANALYTICS_LAST_ATTEMPT = 0.0
+SOCIAL_ANALYTICS_ATTEMPT_LOCK = threading.Lock()
 
 DEFAULT_TOKENS_SQLITE_FILE = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "tokens.sqlite3"
@@ -119,8 +130,57 @@ class Token(TokenBase):
     user_email = Column(String(255), nullable=True)
     access_token = Column(Text, nullable=False)
     refresh_token = Column(Text, nullable=False)
+    profile_data = Column(Text, nullable=True)
     expires_at = Column(DateTime(timezone=True), nullable=True)
     updated_at = Column(DateTime(timezone=True), nullable=False)
+
+
+class SocialAnalyticsSnapshot(TokenBase):
+    __tablename__ = "social_analytics_snapshots"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    platform = Column(String(32), nullable=False, index=True)
+    account_id = Column(String(255), nullable=False)
+    snapshot_date = Column(String(10), nullable=False, index=True)
+    username = Column(String(255), nullable=True)
+    followers = Column(Integer, nullable=True)
+    views = Column(Integer, nullable=True)
+    likes = Column(Integer, nullable=True)
+    comments = Column(Integer, nullable=True)
+    shares = Column(Integer, nullable=True)
+    refreshed_at = Column(DateTime(timezone=True), nullable=False)
+    __table_args__ = (UniqueConstraint("platform", "account_id", "snapshot_date"),)
+
+
+class SocialAnalyticsDailyView(TokenBase):
+    __tablename__ = "social_analytics_daily_views"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    platform = Column(String(32), nullable=False, index=True)
+    account_id = Column(String(255), nullable=False)
+    snapshot_date = Column(String(10), nullable=False, index=True)
+    views = Column(Integer, nullable=False)
+    refreshed_at = Column(DateTime(timezone=True), nullable=False)
+    __table_args__ = (UniqueConstraint("platform", "account_id", "snapshot_date"),)
+
+
+class SocialAnalyticsMediaSnapshot(TokenBase):
+    __tablename__ = "social_analytics_media_snapshots"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    platform = Column(String(32), nullable=False, index=True)
+    account_id = Column(String(255), nullable=False)
+    snapshot_date = Column(String(10), nullable=False, index=True)
+    media_id = Column(String(255), nullable=False)
+    title = Column(Text, nullable=True)
+    posted_at = Column(String(32), nullable=True)
+    views = Column(Integer, nullable=True)
+    likes = Column(Integer, nullable=True)
+    comments = Column(Integer, nullable=True)
+    shares = Column(Integer, nullable=True)
+    permalink = Column(Text, nullable=True)
+    source_folder = Column(String(255), nullable=True)
+    __table_args__ = (UniqueConstraint("platform", "account_id", "snapshot_date", "media_id"),)
 
 
 class NotificationSetting(TokenBase):
@@ -151,6 +211,19 @@ TokenSessionLocal = sessionmaker(
 TokenBase.metadata.create_all(bind=TOKEN_ENGINE)
 
 
+def migrate_token_profile_data_column():
+    columns = {
+        column["name"]
+        for column in sqlalchemy_inspect(TOKEN_ENGINE).get_columns("tokens")
+    }
+    if "profile_data" not in columns:
+        with TOKEN_ENGINE.begin() as connection:
+            connection.execute(text("ALTER TABLE tokens ADD COLUMN profile_data TEXT"))
+
+
+migrate_token_profile_data_column()
+
+
 def _datetime_to_timestamp(value):
     if value is None:
         return None
@@ -171,13 +244,24 @@ def load_tokens_from_db():
         rows = session_db.query(Token).all()
         tokens = {}
         for row in rows:
-            if row.provider not in {"tiktok", "youtube"}:
+            if row.provider not in {"tiktok", "youtube", "instagram"}:
                 continue
+            try:
+                profile_data = (
+                    json.loads(social_publishing.decrypt_token_value(row.profile_data))
+                    if row.profile_data
+                    else {}
+                )
+            except (json.JSONDecodeError, TypeError) as exc:
+                raise social_publishing.SocialPublishingError(
+                    "Os dados da conta social protegidos estão inválidos. Reconecte a conta."
+                ) from exc
             tokens[row.provider] = {
                 "access_token": social_publishing.decrypt_token_value(row.access_token),
                 "refresh_token": social_publishing.decrypt_token_value(row.refresh_token),
                 "expires_at": _datetime_to_timestamp(row.expires_at),
                 "user_email": row.user_email,
+                "profile_data": profile_data if isinstance(profile_data, dict) else {},
             }
         return tokens
     except SQLAlchemyError as exc:
@@ -194,7 +278,7 @@ def save_tokens_to_db(tokens):
     try:
         existing_rows = {row.provider: row for row in session_db.query(Token).all()}
         for provider, token_data in tokens.items():
-            if provider not in {"tiktok", "youtube"}:
+            if provider not in {"tiktok", "youtube", "instagram"}:
                 continue
             encrypted_access = social_publishing.encrypt_token_value(
                 token_data["access_token"]
@@ -202,12 +286,17 @@ def save_tokens_to_db(tokens):
             encrypted_refresh = social_publishing.encrypt_token_value(
                 token_data["refresh_token"]
             )
+            profile_data = token_data.get("profile_data") or {}
+            encrypted_profile = social_publishing.encrypt_token_value(
+                json.dumps(profile_data, ensure_ascii=False)
+            )
             expires_at = _timestamp_to_datetime(token_data.get("expires_at"))
             user_email = token_data.get("user_email")
             row = existing_rows.get(provider)
             if row:
                 row.access_token = encrypted_access
                 row.refresh_token = encrypted_refresh
+                row.profile_data = encrypted_profile
                 row.expires_at = expires_at
                 if user_email is not None:
                     row.user_email = user_email
@@ -219,6 +308,7 @@ def save_tokens_to_db(tokens):
                         user_email=user_email,
                         access_token=encrypted_access,
                         refresh_token=encrypted_refresh,
+                        profile_data=encrypted_profile,
                         expires_at=expires_at,
                         updated_at=now,
                     )
@@ -638,6 +728,378 @@ def record_social_post(video_id, platform, remote_id, status="posted"):
             raise SocialPostsError("Não foi possível salvar o arquivo publicados.json.") from exc
 
 
+def social_analytics_source_folders():
+    remote_to_video = {}
+    remote_to_folder = {}
+    try:
+        for video_id, platforms in load_social_posts().items():
+            for platform, post in platforms.items():
+                if platform in {"tiktok", "instagram"} and post.get("id"):
+                    remote_to_video[str(post["id"])] = video_id
+    except SocialPostsError:
+        pass
+    try:
+        with AUTPOST_STORE._connection() as connection:
+            rows = connection.execute(
+                "SELECT remote_id, video_id, folder_name FROM autopost_history "
+                "WHERE remote_id IS NOT NULL AND status IN ('postado','posted')"
+            ).fetchall()
+        for row in rows:
+            if row[0]:
+                remote_to_folder[str(row[0])] = str(row[2] or "")
+                remote_to_video[str(row[0])] = str(row[1] or "")
+    except (sqlite3.Error, autopost.AutopostStoreError):
+        pass
+
+    video_to_folder = {}
+    try:
+        folder_link = load_drive_folder_link()
+        api_key = os.environ.get("DRIVE_API_KEY", "").strip()
+        if folder_link and api_key:
+            folder_id = extract_folder_id(folder_link)
+            index = get_clips_library_index(folder_id, api_key)
+            video_to_folder = {
+                str(video.get("id")): str(video.get("folderName") or "")
+                for video in index.get("videos", []) if video.get("id")
+            }
+    except (AutomationSettingsError, DriveError, ValueError):
+        pass
+    return {
+        remote_id: remote_to_folder.get(remote_id) or video_to_folder.get(video_id, "")
+        for remote_id, video_id in remote_to_video.items()
+    }
+
+
+def save_social_analytics_snapshot(report, source_folders=None):
+    platform = report["platform"]
+    account_id = str(report["account_id"])
+    snapshot_date = schedule_now().date().isoformat()
+    now = datetime.now(timezone.utc)
+    source_folders = source_folders or {}
+    session_db = TokenSessionLocal()
+    try:
+        previous = (
+            session_db.query(SocialAnalyticsSnapshot)
+            .filter(
+                SocialAnalyticsSnapshot.platform == platform,
+                SocialAnalyticsSnapshot.account_id == account_id,
+                SocialAnalyticsSnapshot.snapshot_date < snapshot_date,
+            )
+            .order_by(SocialAnalyticsSnapshot.snapshot_date.desc())
+            .first()
+        )
+        daily_views = report.get("daily_views") or {}
+        if not daily_views and previous:
+            previous_media = {
+                item.media_id: item.views
+                for item in session_db.query(SocialAnalyticsMediaSnapshot).filter_by(
+                    platform=platform,
+                    account_id=account_id,
+                    snapshot_date=previous.snapshot_date,
+                ).all()
+            }
+            current_media = report.get("media") or []
+            media_views = [item.get("views") for item in current_media]
+            if media_views and all(value is not None for value in media_views):
+                delta = 0
+                for item in current_media:
+                    current_views = int(item["views"])
+                    old_views = previous_media.get(str(item.get("id") or ""))
+                    if old_views is not None:
+                        delta += max(0, current_views - int(old_views))
+                    elif item.get("posted_at") and previous.snapshot_date < item["posted_at"] <= snapshot_date:
+                        delta += current_views
+                daily_views = {snapshot_date: delta}
+
+        snapshot = session_db.query(SocialAnalyticsSnapshot).filter_by(
+            platform=platform, account_id=account_id, snapshot_date=snapshot_date
+        ).first()
+        values = {
+            "username": str(report.get("username") or ""),
+            "followers": report.get("followers"),
+            "views": report.get("views"),
+            "likes": report.get("likes"),
+            "comments": report.get("comments"),
+            "shares": report.get("shares"),
+            "refreshed_at": now,
+        }
+        if snapshot:
+            for key, value in values.items():
+                setattr(snapshot, key, value)
+        else:
+            session_db.add(SocialAnalyticsSnapshot(
+                platform=platform, account_id=account_id,
+                snapshot_date=snapshot_date, **values,
+            ))
+
+        for day, value in daily_views.items():
+            if not isinstance(day, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", day):
+                continue
+            try:
+                day_views = int(value)
+            except (TypeError, ValueError):
+                continue
+            daily_row = session_db.query(SocialAnalyticsDailyView).filter_by(
+                platform=platform, account_id=account_id, snapshot_date=day
+            ).first()
+            if daily_row:
+                daily_row.views = day_views
+                daily_row.refreshed_at = now
+            else:
+                session_db.add(SocialAnalyticsDailyView(
+                    platform=platform, account_id=account_id,
+                    snapshot_date=day, views=day_views, refreshed_at=now,
+                ))
+
+        session_db.query(SocialAnalyticsMediaSnapshot).filter_by(
+            platform=platform, account_id=account_id, snapshot_date=snapshot_date
+        ).delete()
+        for item in report.get("media", []):
+            media_id = str(item.get("id") or "")
+            if not media_id:
+                continue
+            session_db.add(SocialAnalyticsMediaSnapshot(
+                platform=platform, account_id=account_id, snapshot_date=snapshot_date,
+                media_id=media_id, title=str(item.get("title") or "")[:1000],
+                posted_at=str(item.get("posted_at") or "")[:32],
+                views=item.get("views"), likes=item.get("likes"),
+                comments=item.get("comments"), shares=item.get("shares"),
+                permalink=str(item.get("permalink") or "")[:2000],
+                source_folder=str(source_folders.get(media_id) or "")[:255],
+            ))
+
+        cutoff = (schedule_now().date() - timedelta(days=90)).isoformat()
+        for model in (SocialAnalyticsSnapshot, SocialAnalyticsDailyView, SocialAnalyticsMediaSnapshot):
+            session_db.query(model).filter(
+                model.platform == platform,
+                model.account_id == account_id,
+                model.snapshot_date < cutoff,
+            ).delete(synchronize_session=False)
+        session_db.commit()
+    except SQLAlchemyError as exc:
+        session_db.rollback()
+        raise social_analytics.SocialAnalyticsError(
+            "Não foi possível salvar as estatísticas no banco do servidor."
+        ) from exc
+    finally:
+        session_db.close()
+
+
+def clear_social_analytics(platform):
+    session_db = TokenSessionLocal()
+    try:
+        for model in (SocialAnalyticsSnapshot, SocialAnalyticsDailyView, SocialAnalyticsMediaSnapshot):
+            session_db.query(model).filter(model.platform == platform).delete(synchronize_session=False)
+        session_db.commit()
+    except SQLAlchemyError as exc:
+        session_db.rollback()
+        raise social_analytics.SocialAnalyticsError(
+            "Não foi possível limpar os dados sociais do servidor."
+        ) from exc
+    finally:
+        session_db.close()
+
+
+def _social_analytics_tokens():
+    tokens = social_publishing.load_social_tokens()
+    return {
+        platform: token_data for platform, token_data in tokens.items()
+        if platform in {"tiktok", "instagram"} and _has_usable_token(token_data)
+    }
+
+
+def _refresh_social_analytics_worker():
+    errors = {}
+    refreshed = []
+    try:
+        tokens = _social_analytics_tokens()
+        for platform, token_data in tokens.items():
+            try:
+                access_token = social_publishing.get_access_token(platform)
+                if platform == "tiktok":
+                    report = social_analytics.fetch_tiktok_analytics(access_token)
+                else:
+                    profile = token_data.get("profile_data") or {}
+                    report = social_analytics.fetch_instagram_analytics(
+                        access_token, profile.get("account_id")
+                    )
+                save_social_analytics_snapshot(report, social_analytics_source_folders())
+                refreshed.append(platform)
+            except (social_publishing.SocialPublishingError,
+                    social_analytics.SocialAnalyticsError) as exc:
+                errors[platform] = str(exc)
+            except Exception:
+                # Never include unexpected exception text here: API URLs may contain
+                # credentials, and a failed provider should not leave the job running.
+                errors[platform] = "Erro interno ao consultar esta rede social."
+        if not tokens:
+            message = "Conecte TikTok ou Instagram para consultar as estatísticas reais."
+        elif errors and refreshed:
+            message = "Atualização parcial concluída; confira a rede com erro."
+        elif errors:
+            message = "Não foi possível atualizar as estatísticas. Confira conexão e permissões."
+        else:
+            message = "Estatísticas atualizadas pelas APIs oficiais."
+    except social_publishing.SocialPublishingError as exc:
+        errors["servidor"] = str(exc)
+        message = "Não foi possível ler as conexões sociais salvas no servidor."
+    except Exception:
+        errors["servidor"] = "Erro interno ao atualizar as estatísticas sociais."
+        message = "Não foi possível concluir a atualização das estatísticas."
+    with SOCIAL_ANALYTICS_JOB_LOCK:
+        SOCIAL_ANALYTICS_JOB.update({
+            "running": False,
+            "message": message,
+            "errors": errors,
+            "completed_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        })
+
+
+def start_social_analytics_refresh(reason="manual"):
+    global SOCIAL_ANALYTICS_LAST_ATTEMPT
+    with SOCIAL_ANALYTICS_JOB_LOCK:
+        if SOCIAL_ANALYTICS_JOB["running"]:
+            return False
+        SOCIAL_ANALYTICS_JOB.update({
+            "running": True,
+            "message": "Consultando as APIs oficiais do TikTok e Instagram...",
+            "errors": {},
+            "started_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        })
+    with SOCIAL_ANALYTICS_ATTEMPT_LOCK:
+        SOCIAL_ANALYTICS_LAST_ATTEMPT = time.time()
+    threading.Thread(
+        target=_refresh_social_analytics_worker,
+        name=f"social-analytics-{reason}", daemon=True,
+    ).start()
+    return True
+
+
+def social_analytics_job_status():
+    with SOCIAL_ANALYTICS_JOB_LOCK:
+        return dict(SOCIAL_ANALYTICS_JOB)
+
+
+def maybe_start_social_analytics_refresh(tokens):
+    if app.testing or not tokens:
+        return
+    today = schedule_now().date().isoformat()
+    session_db = TokenSessionLocal()
+    try:
+        stale = False
+        for platform, token_data in tokens.items():
+            expected = (token_data.get("profile_data") or {}).get("account_id")
+            query = session_db.query(SocialAnalyticsSnapshot).filter(
+                SocialAnalyticsSnapshot.platform == platform
+            )
+            if expected:
+                query = query.filter(SocialAnalyticsSnapshot.account_id == str(expected))
+            latest = query.order_by(SocialAnalyticsSnapshot.snapshot_date.desc()).first()
+            if not latest or latest.snapshot_date < today:
+                stale = True
+                break
+    except SQLAlchemyError:
+        stale = True
+    finally:
+        session_db.close()
+    with SOCIAL_ANALYTICS_ATTEMPT_LOCK:
+        recently_attempted = time.time() - SOCIAL_ANALYTICS_LAST_ATTEMPT < 900
+    if stale and not recently_attempted:
+        start_social_analytics_refresh("initial")
+
+
+def _format_social_metric(value):
+    return "—" if value is None else f"{int(value):,}".replace(",", ".")
+
+
+def social_analytics_summary(tokens=None):
+    tokens = tokens if tokens is not None else _social_analytics_tokens()
+    connected = list(tokens)
+    session_db = TokenSessionLocal()
+    latest_by_platform = {}
+    media_rows = []
+    daily_by_platform = {platform: {} for platform in connected}
+    try:
+        for platform in connected:
+            expected = str((tokens[platform].get("profile_data") or {}).get("account_id") or "")
+            query = session_db.query(SocialAnalyticsSnapshot).filter(
+                SocialAnalyticsSnapshot.platform == platform
+            )
+            if expected:
+                query = query.filter(SocialAnalyticsSnapshot.account_id == expected)
+            latest = query.order_by(SocialAnalyticsSnapshot.snapshot_date.desc()).first()
+            if not latest:
+                continue
+            latest_by_platform[platform] = latest
+            media_rows.extend(session_db.query(SocialAnalyticsMediaSnapshot).filter_by(
+                platform=platform, account_id=latest.account_id,
+                snapshot_date=latest.snapshot_date,
+            ).all())
+            first_day = (schedule_now().date() - timedelta(days=29)).isoformat()
+            for point in session_db.query(SocialAnalyticsDailyView).filter(
+                SocialAnalyticsDailyView.platform == platform,
+                SocialAnalyticsDailyView.account_id == latest.account_id,
+                SocialAnalyticsDailyView.snapshot_date >= first_day,
+            ).all():
+                daily_by_platform[platform][point.snapshot_date] = int(point.views)
+    except SQLAlchemyError as exc:
+        raise social_analytics.SocialAnalyticsError(
+            "Não foi possível ler as estatísticas salvas no banco do servidor."
+        ) from exc
+    finally:
+        session_db.close()
+
+    totals = {}
+    for field in ("views", "likes", "comments", "shares", "followers"):
+        values = [getattr(latest_by_platform[p], field) for p in connected
+                  if p in latest_by_platform and getattr(latest_by_platform[p], field) is not None]
+        totals[field] = sum(values) if values else None
+    if all(totals[key] is not None for key in ("views", "likes", "comments", "shares")) and totals["views"] > 0:
+        rate = (totals["likes"] + totals["comments"] + totals["shares"]) / totals["views"] * 100
+        totals["engagement_rate"] = f"{rate:.2f}%".replace(".", ",")
+    else:
+        totals["engagement_rate"] = "—"
+    display_totals = {key: _format_social_metric(value) for key, value in totals.items()
+                      if key != "engagement_rate"}
+    display_totals["engagement_rate"] = totals["engagement_rate"]
+
+    today = schedule_now().date()
+    chart_days = []
+    for offset in range(29, -1, -1):
+        day = (today - timedelta(days=offset)).isoformat()
+        chart_days.append({
+            "date": day,
+            "tiktok": daily_by_platform.get("tiktok", {}).get(day),
+            "instagram": daily_by_platform.get("instagram", {}).get(day),
+        })
+    top_media = sorted(
+        (row for row in media_rows if row.likes is not None),
+        key=lambda row: (int(row.likes or 0), int(row.views or 0)), reverse=True,
+    )[:5]
+    top_videos = [{
+        "title": row.title or "Publicação sem título",
+        "folder": row.source_folder or "Origem não identificada",
+        "platform": {"tiktok": "TikTok", "instagram": "Instagram"}.get(row.platform, row.platform),
+        "likes": _format_social_metric(row.likes),
+        "views": _format_social_metric(row.views),
+        "permalink": row.permalink or "",
+    } for row in top_media]
+    updated = max((row.refreshed_at for row in latest_by_platform.values()), default=None)
+    if updated and updated.tzinfo is None:
+        updated = updated.replace(tzinfo=timezone.utc)
+    return {
+        "connected": connected,
+        "totals": display_totals,
+        "chart_days": chart_days,
+        "top_videos": top_videos,
+        "updated_at": updated.astimezone(AUTPOST_TIMEZONE).strftime("%d/%m/%Y %H:%M") if updated else "",
+        "job": social_analytics_job_status(),
+        "has_data": bool(latest_by_platform),
+        "has_connected": bool(connected),
+        "usernames": {p: getattr(latest_by_platform.get(p), "username", "") for p in connected},
+    }
+
+
 def _read_folder_models():
     try:
         with open(FOLDER_MODELS_FILE, "r", encoding="utf-8") as file:
@@ -815,6 +1277,7 @@ def social_template_context():
             "csrf_token": get_csrf_token(),
             "tiktok_connected": False,
             "youtube_connected": False,
+            "instagram_connected": False,
             "social_token_error": None,
         }
 
@@ -827,8 +1290,10 @@ def social_template_context():
 
     tiktok_token = tokens.get("tiktok", {})
     youtube_token = tokens.get("youtube", {})
+    instagram_token = tokens.get("instagram", {})
     tiktok_connected = _has_usable_token(tiktok_token)
     youtube_connected = _has_usable_token(youtube_token)
+    instagram_connected = _has_usable_token(instagram_token)
 
     if (
         youtube_connected
@@ -846,6 +1311,7 @@ def social_template_context():
         "csrf_token": get_csrf_token(),
         "tiktok_connected": tiktok_connected,
         "youtube_connected": youtube_connected,
+        "instagram_connected": instagram_connected,
         "social_token_error": token_error,
     }
 
@@ -1009,15 +1475,23 @@ def logout():
 
 
 def _oauth_redirect_uri_override(platform):
-    env_var = "TIKTOK_REDIRECT_URI" if platform == "tiktok" else "YOUTUBE_REDIRECT_URI"
-    if os.environ.get(env_var, "").strip():
+    env_vars = {
+        "tiktok": ("TIKTOK_REDIRECT_URI",),
+        "youtube": ("YOUTUBE_REDIRECT_URI",),
+        "instagram": (
+            "INSTAGRAM_REDIRECT_URI",
+            "META_REDIRECT_URI",
+            "FACEBOOK_REDIRECT_URI",
+        ),
+    }.get(platform, ())
+    if any(os.environ.get(env_var, "").strip() for env_var in env_vars):
         return None
     return url_for("social_oauth_callback", platform=platform, _external=True)
 
 
 @app.route("/oauth/<platform>")
 def start_social_oauth(platform):
-    if platform not in {"tiktok", "youtube"}:
+    if platform not in {"tiktok", "youtube", "instagram"}:
         return Response("Plataforma inválida.", status=404, mimetype="text/plain")
     try:
         social_publishing.validate_token_encryption()
@@ -1038,14 +1512,14 @@ def start_social_oauth(platform):
             authorization = social_publishing.authorization_url(platform, state, **kwargs)
         session[f"oauth_state_{platform}"] = state
         return redirect(authorization)
-    except social_publishing.SocialPublishingError as exc:
+    except (social_publishing.SocialPublishingError, social_analytics.SocialAnalyticsError) as exc:
         flash(str(exc), "error")
         return redirect(url_for("configuration"))
 
 
 @app.route("/oauth/<platform>/callback")
 def social_oauth_callback(platform):
-    if platform not in {"tiktok", "youtube"}:
+    if platform not in {"tiktok", "youtube", "instagram"}:
         return Response("Plataforma inválida.", status=404, mimetype="text/plain")
     expected_state = session.pop(f"oauth_state_{platform}", "")
     code_verifier = (
@@ -1079,7 +1553,11 @@ def social_oauth_callback(platform):
             )
         else:
             social_publishing.exchange_authorization_code(platform, code, **kwargs)
-    except social_publishing.SocialPublishingError as exc:
+        if platform in {"tiktok", "instagram"}:
+            clear_social_analytics(platform)
+            if not app.testing:
+                start_social_analytics_refresh("connect")
+    except (social_publishing.SocialPublishingError, social_analytics.SocialAnalyticsError) as exc:
         flash(str(exc), "error")
         return redirect(url_for("configuration"))
     flash(f"{social_publishing.platform_display_name(platform)} conectado.", "success")
@@ -1088,7 +1566,7 @@ def social_oauth_callback(platform):
 
 @app.route("/oauth/<platform>/disconnect", methods=["POST"])
 def disconnect_social(platform):
-    if platform not in {"tiktok", "youtube"}:
+    if platform not in {"tiktok", "youtube", "instagram"}:
         return Response("Plataforma inválida.", status=404, mimetype="text/plain")
     csrf_token = session.get("csrf_token", "")
     supplied_token = (
@@ -1104,11 +1582,45 @@ def disconnect_social(platform):
         )
     try:
         social_publishing.delete_social_token(platform)
-    except social_publishing.SocialPublishingError as exc:
+        if platform in {"tiktok", "instagram"}:
+            clear_social_analytics(platform)
+    except (social_publishing.SocialPublishingError, social_analytics.SocialAnalyticsError) as exc:
         flash(str(exc), "error")
         return redirect(url_for("configuration"))
     flash(f"{social_publishing.platform_display_name(platform)} desconectado.", "success")
     return redirect(url_for("configuration"))
+
+
+@app.route("/statistics/refresh", methods=["POST"])
+def refresh_social_statistics():
+    csrf_token = session.get("csrf_token", "")
+    supplied_token = request.form.get("csrf_token", "")
+    if not csrf_token or not supplied_token or not secrets.compare_digest(csrf_token, supplied_token):
+        return Response(
+            "A sessão expirou. Atualize a página e tente novamente.",
+            status=400,
+            mimetype="text/plain",
+        )
+    try:
+        tokens = _social_analytics_tokens()
+        if not tokens:
+            flash("Conecte TikTok ou Instagram para consultar as estatísticas reais.", "error")
+        elif start_social_analytics_refresh("manual"):
+            flash("Atualização das estatísticas iniciada no servidor.", "success")
+        else:
+            flash("As estatísticas já estão sendo atualizadas.", "success")
+    except social_publishing.SocialPublishingError as exc:
+        flash(str(exc), "error")
+    return redirect(url_for("dashboard", page="stats"))
+
+
+@app.route("/api/social-statistics/status")
+def social_statistics_status():
+    csrf_token = session.get("csrf_token", "")
+    supplied_token = request.headers.get("X-CSRF-Token", "")
+    if not csrf_token or not supplied_token or not secrets.compare_digest(csrf_token, supplied_token):
+        return jsonify(error="Atualize a página para acompanhar as estatísticas."), 403
+    return jsonify(social_analytics_job_status())
 
 
 @app.route("/tiktok-developers-site-verification.txt")
@@ -1222,6 +1734,17 @@ def index():
     automatic_script = ""
     clips_library_script = ""
     panel_stats = {"videos": 0, "folders": 0, "posted": 0}
+    social_stats = {
+        "connected": [],
+        "totals": {key: "—" for key in ("views", "likes", "comments", "shares", "followers", "engagement_rate")},
+        "chart_days": [],
+        "top_videos": [],
+        "updated_at": "",
+        "job": social_analytics_job_status(),
+        "has_data": False,
+        "has_connected": False,
+        "usernames": {},
+    }
 
     if configuration_view and request.method == "GET":
         settings, notification_error = notification_settings_with_status()
@@ -1342,7 +1865,7 @@ def index():
             path_ids = [folder_id]
         except ValueError as exc:
             error = str(exc)
-    elif request.args.get("path") or request.endpoint == "dashboard":
+    elif panel_page != "stats" and (request.args.get("path") or request.endpoint == "dashboard"):
         sort_order = request.args.get("sort_order", "")
         good_filter = request.args.get("good_filter", "all")
         posted_filter = request.args.get("posted_filter", "all")
@@ -1364,7 +1887,7 @@ def index():
             error = str(exc)
         except ValueError as exc:
             error = str(exc)
-    if path_ids and panel_page not in {"automatic", "clips"}:
+    if path_ids and panel_page not in {"automatic", "clips", "stats"}:
         folder_link = folder_link or f"https://drive.google.com/drive/folders/{path_ids[0]}"
         api_key = os.environ.get("DRIVE_API_KEY", "").strip()
         try:
@@ -1473,6 +1996,15 @@ def index():
         except (DriveError, AutomationSettingsError, ValueError) as exc:
             error = error or str(exc)
 
+    if dashboard_view and panel_page == "stats" and request.method == "GET":
+        try:
+            analytics_tokens = _social_analytics_tokens()
+            maybe_start_social_analytics_refresh(analytics_tokens)
+            social_stats = social_analytics_summary(analytics_tokens)
+        except (social_publishing.SocialPublishingError,
+                social_analytics.SocialAnalyticsError) as exc:
+            error = error or str(exc)
+
     drive_link_saved = drive_link_saved or bool(folder_link)
     if dashboard_view and panel_page == "clips" and drive_link_saved:
         clips_library_script = CLIPS_LIBRARY_SCRIPT
@@ -1513,6 +2045,7 @@ def index():
         automatic_script=automatic_script,
         clips_library_script=clips_library_script,
         current_folder_id=path_ids[-1] if path_ids else "",
+        social_stats=social_stats,
     )
 
 
@@ -2672,6 +3205,16 @@ def ensure_autopost_scheduler():
         if AUTPOST_SCHEDULER_STARTED:
             return
         AUTPOST_SCHEDULER.start()
+        AUTPOST_SCHEDULER.add_job(
+            start_social_analytics_refresh,
+            trigger=CronTrigger(hour=6, minute=15, timezone=AUTPOST_TIMEZONE),
+            args=("daily",),
+            id="social-analytics-daily",
+            replace_existing=True,
+            coalesce=True,
+            max_instances=1,
+            misfire_grace_time=21600,
+        )
         for schedule in AUTPOST_STORE.list_active_schedules():
             register_autopost_schedule(schedule)
         AUTPOST_SCHEDULER_STARTED = True

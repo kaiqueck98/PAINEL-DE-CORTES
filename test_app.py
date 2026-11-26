@@ -391,35 +391,47 @@ class PanelRouteTests(unittest.TestCase):
         self.assertIn(b"page=clips&amp;path=root123,child123,nested123", response.data)
         self.assertNotIn(b"Corte pronto.mp4", response.data)
 
-    def test_statistics_use_real_drive_and_posted_counts(self):
-        view = {
-            "folder_name": "Cortes",
-            "folders": [],
-            "videos": [
-                {"id": "low123", "name": "Teste.mp4", "videoMediaMetadata": {"durationMillis": "5000"}},
-                {
-                    "id": "best123",
-                    "name": "Corte final pronto.mp4",
-                    "thumbnailLink": "https://example.test/cover.jpg",
-                    "videoMediaMetadata": {"durationMillis": "60000"},
-                },
-            ],
-            "video_count": 2,
-            "warnings": [],
-        }
-        with patch.dict(os.environ, {"DRIVE_API_KEY": "test-key"}), patch.object(
-            app, "get_folder_view", side_effect=lambda *_: deepcopy(view)
-        ), patch.object(app, "load_good_video_ids", return_value={"best123"}), patch.object(
-            app, "load_posted_video_ids", return_value={"best123"}
-        ), patch.object(app, "load_social_posts", return_value={}):
-            response = self.client.get(
-                "/dashboard?page=stats&path=root123,child123"
-            )
+    def test_statistics_show_only_social_metrics_and_connect_buttons_when_disconnected(self):
+        with patch.object(app.social_publishing, "load_social_tokens", return_value={}), patch.object(
+            app, "get_folder_view"
+        ) as get_folder_view:
+            response = self.client.get("/dashboard?page=stats&path=root123,child123")
 
-        self.assertIn(b"Estat\xc3\xadsticas reais", response.data)
-        self.assertIn(b"Total de cortes</small><div class=\"metric\">2", response.data)
-        self.assertIn(b"Pastas encontradas</small><div class=\"metric\">0", response.data)
-        self.assertIn(b"Marcados como postados</small><div class=\"metric\">1", response.data)
+        self.assertEqual(response.status_code, 200)
+        page = response.get_data(as_text=True)
+        self.assertIn("Total de visualizações", page)
+        self.assertIn("Total de curtidas", page)
+        self.assertIn("Total de comentários", page)
+        self.assertIn("Total de compartilhamentos", page)
+        self.assertIn("Seguidores", page)
+        self.assertIn("Taxa de engajamento", page)
+        self.assertIn("Conectar TikTok", page)
+        self.assertIn("Conectar Instagram", page)
+        self.assertNotIn("Total de cortes", page)
+        self.assertNotIn("Pastas encontradas", page)
+        self.assertNotIn("Marcados como postados", page)
+        self.assertIn("—", page)
+        get_folder_view.assert_not_called()
+
+    def test_disconnect_clears_saved_analytics_and_stats_request_connection(self):
+        with self.client.session_transaction() as browser_session:
+            browser_session["csrf_token"] = "csrf-test"
+        with patch.object(app.social_publishing, "delete_social_token") as delete_token, patch.object(
+            app, "clear_social_analytics"
+        ) as clear_analytics, patch.object(
+            app.social_publishing, "load_social_tokens", return_value={}
+        ):
+            response = self.client.post(
+                "/oauth/tiktok/disconnect", data={"csrf_token": "csrf-test"}
+            )
+            stats = self.client.get("/dashboard?page=stats")
+
+        self.assertEqual(response.status_code, 302)
+        delete_token.assert_called_once_with("tiktok")
+        clear_analytics.assert_called_once_with("tiktok")
+        page = stats.get_data(as_text=True)
+        self.assertIn("Conectar TikTok", page)
+        self.assertIn("—", page)
 
     def test_mark_good_persists_video_id_to_json_file(self):
         view = {
@@ -631,6 +643,7 @@ class PanelRouteTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertIn(b"TikTok", response.data)
+        self.assertIn(b"Conectar Instagram", response.data)
         self.assertIn(b"YouTube", response.data)
         self.assertNotIn(b"Configure SOCIAL_TOKEN_ENCRYPTION_KEY", response.data)
 
