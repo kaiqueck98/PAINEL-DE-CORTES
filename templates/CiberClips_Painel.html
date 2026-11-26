@@ -66,6 +66,8 @@
     .form-actions button{white-space:nowrap}
     .social-connections{display:flex;flex-wrap:wrap;gap:10px;margin:14px 0}
     .connection-group{display:inline-flex;align-items:center;flex-wrap:wrap;gap:6px}
+    .connection-status{display:inline-flex;align-items:center;padding:8px 10px;border:1px solid #3c3d48;border-radius:9px;color:#d4d4d8;font-size:.8rem;font-weight:700}
+    .connection-status.connected{border-color:#347653;background:#1d3b2a;color:#a7f3c1}
     .connection-link{display:inline-flex;align-items:center;justify-content:center;padding:10px 14px;border:1px solid #514276;border-radius:10px;background:#29213b;color:#ddd6fe;font-size:.85rem;font-weight:700;text-decoration:none}
     .connection-link.connected{border-color:#347653;background:#1d3b2a;color:#a7f3c1}
     .connection-link.disconnected{border-color:#3c3d48;background:#24252d;color:#d4d4d8}
@@ -77,6 +79,8 @@
     .notification-card form{margin-top:16px}
     .notification-card input:not([type=hidden]){display:block}
     .notification-card button{width:auto}
+    .notification-toggle{display:flex;align-items:center;gap:9px}
+    .notification-toggle input{width:auto;margin:0;accent-color:#8b5cf6}
     .settings-hint{margin:8px 0;color:#a6a0b6;font-size:.86rem}
     .analysis-progress{padding:18px;border:1px solid #485572;border-radius:12px;background:#101726}
     .analysis-progress progress{display:block;width:100%;height:28px;margin:12px 0;accent-color:#22c55e}
@@ -244,9 +248,8 @@
             {% if social_token_error %}<div class="message" role="alert">{{ social_token_error }}</div>{% endif %}
             <nav class="social-connections" aria-label="Conectar redes sociais">
               <div class="connection-group">
-                <a class="connection-link {% if tiktok_connected %}connected{% else %}disconnected{% endif %}" href="{{ url_for('start_social_oauth', platform='tiktok') }}">
-                  {% if tiktok_connected %}TikTok conectado ✅{% else %}TikTok desconectado · Conectar{% endif %}
-                </a>
+                <span class="connection-status {% if tiktok_connected %}connected{% else %}disconnected{% endif %}">{{ 'Conectado' if tiktok_connected else 'Não conectado' }}</span>
+                <a class="connection-link {% if tiktok_connected %}connected{% else %}disconnected{% endif %}" href="{{ url_for('start_social_oauth', platform='tiktok') }}">{{ 'Reconectar TikTok' if tiktok_connected else 'Conectar TikTok' }}</a>
                 {% if tiktok_connected %}
                   <form class="connection-disconnect-form" method="post" action="{{ url_for('disconnect_social', platform='tiktok') }}">
                     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
@@ -255,9 +258,8 @@
                 {% endif %}
               </div>
               <div class="connection-group">
-                <a class="connection-link {% if instagram_connected %}connected{% else %}disconnected{% endif %}" href="{{ url_for('start_social_oauth', platform='instagram') }}">
-                  {% if instagram_connected %}Instagram conectado ✅{% else %}Conectar Instagram{% endif %}
-                </a>
+                <span class="connection-status {% if instagram_connected %}connected{% else %}disconnected{% endif %}">{{ 'Conectado' if instagram_connected else 'Não conectado' }}</span>
+                <a class="connection-link {% if instagram_connected %}connected{% else %}disconnected{% endif %}" href="{{ url_for('start_social_oauth', platform='instagram') }}">{{ 'Reconectar Instagram' if instagram_connected else 'Conectar Instagram' }}</a>
                 {% if instagram_connected %}
                   <form class="connection-disconnect-form" method="post" action="{{ url_for('disconnect_social', platform='instagram') }}">
                     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
@@ -266,9 +268,8 @@
                 {% endif %}
               </div>
               <div class="connection-group">
-                <a class="connection-link {% if youtube_connected %}connected{% else %}disconnected{% endif %}" href="{{ url_for('start_social_oauth', platform='youtube') }}">
-                  {% if youtube_connected %}YouTube conectado ✅{% else %}YouTube desconectado · Conectar{% endif %}
-                </a>
+                <span class="connection-status {% if youtube_connected %}connected{% else %}disconnected{% endif %}">{{ 'Conectado' if youtube_connected else 'Não conectado' }}</span>
+                <a class="connection-link {% if youtube_connected %}connected{% else %}disconnected{% endif %}" href="{{ url_for('start_social_oauth', platform='youtube') }}">{{ 'Reconectar YouTube' if youtube_connected else 'Conectar YouTube' }}</a>
                 {% if youtube_connected %}
                   <form class="connection-disconnect-form" method="post" action="{{ url_for('disconnect_social', platform='youtube') }}">
                     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
@@ -286,26 +287,24 @@
             <summary>Configurações de avisos</summary>
             <form method="post" action="{{ url_for('salvar_notificacoes') }}">
               <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-              {% for field in notification_fields %}
-                <label>{{ field }}
+              <label class="notification-toggle"><input name="NOTIFICATIONS_ENABLED" type="checkbox" value="1"{% if notification_values.get('NOTIFICATIONS_ENABLED', '1') != '0' %} checked{% endif %}> Ligar avisos de postagem</label>
+              {% for field in notification_fields if field != 'NOTIFICATIONS_ENABLED' %}
+                <label>{% if field == 'TELEGRAM_BOT_TOKEN' %}Token do bot do Telegram{% elif field == 'TELEGRAM_CHAT_ID' %}ID da conversa do Telegram{% else %}{{ field }}{% endif %}
                   <input name="{{ field }}" type="{{ 'password' if field.endswith('TOKEN') else 'text' }}"
-                    value="{{ '' if field.endswith('TOKEN') else notification_values.get(field, '') }}" autocomplete="off">
+                    value="{{ '' if field.endswith('TOKEN') else notification_values.get(field, '') }}"{% if field.endswith('TOKEN') %} placeholder="Deixe vazio para manter o token salvo"{% endif %} autocomplete="off">
                 </label>
               {% endfor %}
               <p>Token vazio mantém o valor salvo. Telegram: inicie uma conversa com seu bot. WhatsApp: use número com país e DDD, access token, Phone Number ID e template aprovado com um parâmetro de corpo para a mensagem. Idioma padrão: pt_BR.</p>
               <button type="submit">Salvar avisos</button>
+              <p role="status">{{ 'Telegram configurado ✅' if telegram_configured else 'Telegram não configurado' }}</p>
+              {% if notification_error %}<p class="message" role="alert">Erro ao ler configurações: {{ notification_error }}</p>{% endif %}
+              {% for warning in config_warnings %}<p class="message" role="status">{{ warning }}</p>{% endfor %}
             </form>
           </details>
           <form method="post" action="{{ url_for('testar_telegram') }}" class="notification-card">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
             <button type="submit">TESTAR TELEGRAM</button>
           </form>
-          <section class="card config-section">
-            <h3>Outras configurações</h3>
-            <p role="status">{{ 'Telegram configurado ✅' if telegram_configured else 'Telegram não configurado' }}</p>
-            {% if notification_error %}<p class="message" role="alert">Erro ao ler configurações: {{ notification_error }}</p>{% endif %}
-            {% for warning in config_warnings %}<p class="message" role="status">{{ warning }}</p>{% endfor %}
-          </section>
           <section class="card config-section" aria-labelledby="password-heading">
             <h3 id="password-heading">Alterar senha</h3>
             <form method="post" action="{{ url_for('configuration') }}">
@@ -328,11 +327,7 @@
           </div>
           {% if error %}<div class="message" role="alert">{{ error }}</div>{% endif %}
           {% if not drive_link_saved %}
-            <section class="card">
-              <h3>Configure a pasta do Google Drive</h3>
-              <p>Salve o link nas Configurações para preparar a fila de postagem.</p>
-              <a class="connection-link" href="{{ url_for('configuration') }}">Abrir Configurações</a>
-            </section>
+            <p class="stats-empty" role="status">A fila aguarda a pasta principal salva em Configurações.</p>
           {% elif not automatic_schedule %}
             <section class="card" role="status"><p>A fila automática não pôde ser iniciada. Confira a configuração da pasta e tente novamente.</p></section>
           {% else %}
@@ -359,11 +354,7 @@
             </div>
             {% if error %}<div class="message" role="alert">{{ error }}</div>{% endif %}
             {% if not drive_link_saved %}
-              <section class="card">
-                <h3>Configure a pasta do Google Drive</h3>
-                <p>Salve a pasta principal nas Configura&ccedil;&otilde;es para carregar a biblioteca.</p>
-                <a class="connection-link" href="{{ url_for('configuration') }}">Abrir Configura&ccedil;&otilde;es</a>
-              </section>
+              <p class="library-count" role="status">Nenhum vídeo carregado.</p>
             {% else %}
               <section class="card library-controls">
                 <div class="library-controls-grid">
@@ -417,12 +408,13 @@
           </div>
           {% if social_stats.job.errors %}
             {% for platform, message in social_stats.job.errors.items() %}
-              <div class="message" role="alert">{{ platform|capitalize }}: {{ message }}</div>
+              {% if not (platform == 'tiktok' and social_stats.tiktok_reconnect_required) %}<div class="message" role="alert">{{ platform|capitalize }}: {{ message }}</div>{% endif %}
             {% endfor %}
           {% endif %}
           <section class="card" aria-labelledby="social-stats-chart-title">
             <div class="row">
               <h3 id="social-stats-chart-title">Visualizações por dia</h3>
+              {% if not social_stats.tiktok_reconnect_required %}
               <div class="row">
                 <label for="social-stats-platform">Rede</label>
                 <select id="social-stats-platform">
@@ -436,10 +428,17 @@
                   <option value="30">Últimos 30 dias</option>
                 </select>
               </div>
+              {% endif %}
             </div>
+            {% if social_stats.tiktok_reconnect_required %}
+              <p class="stats-empty" role="alert">Conecte o TikTok de novo para ver as estatísticas - vá em Configurações e clique em Reconectar TikTok.</p>
+              <a class="connection-link" href="{{ url_for('configuration') }}">Ir para Configurações</a>
+            {% else %}
+              {% if social_stats.tiktok_scope_check_pending %}<p class="stats-empty" role="status">Verificando as permissões de leitura do TikTok...</p>{% endif %}
             <p>O Instagram mostra o histórico diário disponível na API. O TikTok fornece contadores acumulados; o histórico dele começa após a primeira coleta e o painel calcula a variação entre coletas.</p>
             <div class="stats-chart-wrap"><div id="social-stats-chart" class="stats-chart-bars" role="img" aria-label="Gráfico de visualizações por dia"></div></div>
             <div class="stats-chart-legend"><span><i></i>TikTok</span><span><i class="instagram"></i>Instagram</span></div>
+            {% endif %}
           </section>
           <section class="card" aria-labelledby="social-stats-top-title">
             <h3 id="social-stats-top-title">O povo mais gostou</h3>
@@ -460,16 +459,13 @@
             {% elif social_stats.has_connected %}
               <p class="stats-empty">A lista aparecerá depois da primeira leitura das publicações autorizadas.</p>
             {% else %}
-              <p class="stats-empty">Conecte uma rede para ver as publicações com mais curtidas.</p>
+              <p class="stats-empty">Nenhuma publicação conectada.</p>
             {% endif %}
           </section>
-          {% if not tiktok_connected or not instagram_connected %}
+          {% if not social_stats.tiktok_reconnect_required and (not tiktok_connected or not instagram_connected) %}
             <section class="card">
-              <h3>Conecte suas contas para carregar métricas</h3>
-              <nav class="social-connections" aria-label="Conectar redes para estatísticas">
-                {% if not tiktok_connected %}<a class="connection-link disconnected" href="{{ url_for('start_social_oauth', platform='tiktok') }}">Conectar TikTok</a>{% endif %}
-                {% if not instagram_connected %}<a class="connection-link disconnected" href="{{ url_for('start_social_oauth', platform='instagram') }}">Conectar Instagram</a>{% endif %}
-              </nav>
+              <p>Conecte suas contas em Configurações.</p>
+              <a class="connection-link" href="{{ url_for('configuration') }}">Ir para Configurações</a>
             </section>
           {% endif %}
           <script>
@@ -479,6 +475,7 @@
               const period = document.getElementById('social-stats-period');
               const series = {{ social_stats.chart_days|tojson }};
               const connected = {{ social_stats.connected|tojson }};
+              if (chart && network && period) {
               function drawChart() {
                 const rows = series.slice(-Number(period.value));
                 const selected = network.value === 'all' ? connected : [network.value];
@@ -522,6 +519,7 @@
               network.addEventListener('change', drawChart);
               period.addEventListener('change', drawChart);
               drawChart();
+              }
 
               const status = document.getElementById('social-stats-status');
               const csrf = document.querySelector('[name="csrf_token"]')?.value || '';

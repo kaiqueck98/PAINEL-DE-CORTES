@@ -908,18 +908,40 @@ def _social_analytics_tokens():
     }
 
 
+TIKTOK_RECONNECT_STATS_MESSAGE = (
+    "Conecte o TikTok de novo para ver as estatísticas - vá em Configurações e clique em Reconectar TikTok."
+)
+
+
+def _is_tiktok_scope_authorization_error(error):
+    message = str(error or "").casefold()
+    return "scope" in message and any(
+        marker in message for marker in ("authoriz", "permission", "required")
+    )
+
+
 def _refresh_social_analytics_worker():
     errors = {}
     refreshed = []
     try:
         tokens = _social_analytics_tokens()
         for platform, token_data in tokens.items():
+            profile = token_data.get("profile_data") or {}
+            if platform == "tiktok" and profile.get("tiktok_stats_reconnect_required"):
+                errors[platform] = TIKTOK_RECONNECT_STATS_MESSAGE
+                continue
             try:
                 access_token = social_publishing.get_access_token(platform)
                 if platform == "tiktok":
                     report = social_analytics.fetch_tiktok_analytics(access_token)
+                    social_publishing.update_social_token_profile_data(
+                        "tiktok",
+                        {
+                            "tiktok_stats_scope_verified": True,
+                            "tiktok_stats_reconnect_required": False,
+                        },
+                    )
                 else:
-                    profile = token_data.get("profile_data") or {}
                     report = social_analytics.fetch_instagram_analytics(
                         access_token, profile.get("account_id")
                     )
@@ -927,7 +949,20 @@ def _refresh_social_analytics_worker():
                 refreshed.append(platform)
             except (social_publishing.SocialPublishingError,
                     social_analytics.SocialAnalyticsError) as exc:
-                errors[platform] = str(exc)
+                if platform == "tiktok" and _is_tiktok_scope_authorization_error(exc):
+                    try:
+                        social_publishing.update_social_token_profile_data(
+                            "tiktok",
+                            {
+                                "tiktok_stats_scope_verified": False,
+                                "tiktok_stats_reconnect_required": True,
+                            },
+                        )
+                    except social_publishing.SocialPublishingError:
+                        pass
+                    errors[platform] = TIKTOK_RECONNECT_STATS_MESSAGE
+                else:
+                    errors[platform] = str(exc)
             except Exception:
                 # Never include unexpected exception text here: API URLs may contain
                 # credentials, and a failed provider should not leave the job running.
@@ -988,7 +1023,11 @@ def maybe_start_social_analytics_refresh(tokens):
     try:
         stale = False
         for platform, token_data in tokens.items():
-            expected = (token_data.get("profile_data") or {}).get("account_id")
+            profile = token_data.get("profile_data") or {}
+            if platform == "tiktok" and not profile.get("tiktok_stats_reconnect_required") and not profile.get("tiktok_stats_scope_verified"):
+                stale = True
+                break
+            expected = profile.get("account_id")
             query = session_db.query(SocialAnalyticsSnapshot).filter(
                 SocialAnalyticsSnapshot.platform == platform
             )
@@ -1014,7 +1053,24 @@ def _format_social_metric(value):
 
 def social_analytics_summary(tokens=None):
     tokens = tokens if tokens is not None else _social_analytics_tokens()
-    connected = list(tokens)
+    all_connected = list(tokens)
+    tiktok_profile = (tokens.get("tiktok") or {}).get("profile_data") or {}
+    job_status = social_analytics_job_status()
+    tiktok_job_error = (job_status.get("errors") or {}).get("tiktok", "")
+    tiktok_reconnect_required = bool(
+        tiktok_profile.get("tiktok_stats_reconnect_required")
+        or _is_tiktok_scope_authorization_error(tiktok_job_error)
+        or tiktok_job_error == TIKTOK_RECONNECT_STATS_MESSAGE
+    )
+    tiktok_scope_check_pending = bool(
+        "tiktok" in tokens
+        and not tiktok_reconnect_required
+        and not tiktok_profile.get("tiktok_stats_scope_verified")
+    )
+    blocked_platforms = set()
+    if tiktok_reconnect_required or tiktok_scope_check_pending:
+        blocked_platforms.add("tiktok")
+    connected = [platform for platform in all_connected if platform not in blocked_platforms]
     session_db = TokenSessionLocal()
     latest_by_platform = {}
     media_rows = []
@@ -1093,9 +1149,11 @@ def social_analytics_summary(tokens=None):
         "chart_days": chart_days,
         "top_videos": top_videos,
         "updated_at": updated.astimezone(AUTPOST_TIMEZONE).strftime("%d/%m/%Y %H:%M") if updated else "",
-        "job": social_analytics_job_status(),
+        "job": job_status,
         "has_data": bool(latest_by_platform),
-        "has_connected": bool(connected),
+        "has_connected": bool(all_connected),
+        "tiktok_reconnect_required": tiktok_reconnect_required,
+        "tiktok_scope_check_pending": tiktok_scope_check_pending,
         "usernames": {p: getattr(latest_by_platform.get(p), "username", "") for p in connected},
     }
 
@@ -1723,7 +1781,6 @@ def index():
     config_warnings = []
     drive_link_saved = False
     drive_settings_error = ""
-    submitted_folder_link = False
     path_ids = []
     posted_video_ids = set()
     sort_order = ""
@@ -1744,6 +1801,8 @@ def index():
         "has_data": False,
         "has_connected": False,
         "usernames": {},
+        "tiktok_reconnect_required": False,
+        "tiktok_scope_check_pending": False,
     }
 
     if configuration_view and request.method == "GET":
@@ -1855,16 +1914,6 @@ def index():
             error = str(exc)
             if path_ids:
                 folder_link = f"https://drive.google.com/drive/folders/{path_ids[0]}"
-    elif request.method == "POST":
-        folder_link = request.form.get("folder_link", "").strip()
-        submitted_folder_link = True
-        try:
-            if not folder_link:
-                raise ValueError("Cole o link da pasta do Google Drive.")
-            folder_id = extract_folder_id(folder_link)
-            path_ids = [folder_id]
-        except ValueError as exc:
-            error = str(exc)
     elif panel_page != "stats" and (request.args.get("path") or request.endpoint == "dashboard"):
         sort_order = request.args.get("sort_order", "")
         good_filter = request.args.get("good_filter", "all")
@@ -1955,9 +2004,6 @@ def index():
             else:
                 videos = sorted(videos, key=lambda video: video["posted"])
             view["videos"] = videos
-            if submitted_folder_link:
-                save_drive_folder_link(folder_link)
-                return redirect(url_for("dashboard"))
         except (
             DriveError,
             AutomationSettingsError,
@@ -4504,7 +4550,7 @@ TITLE_EDITOR_SCRIPT = r"""
 """
 
 
-NOTIFICATION_FIELDS = ('TELEGRAM_BOT_TOKEN', 'TELEGRAM_CHAT_ID', 'WHATSAPP_NUMERO',
+NOTIFICATION_FIELDS = ('NOTIFICATIONS_ENABLED', 'TELEGRAM_BOT_TOKEN', 'TELEGRAM_CHAT_ID', 'WHATSAPP_NUMERO',
                        'WHATSAPP_ACCESS_TOKEN', 'WHATSAPP_PHONE_NUMBER_ID',
                        'WHATSAPP_TEMPLATE', 'WHATSAPP_TEMPLATE_LANGUAGE')
 
@@ -4642,10 +4688,12 @@ def notification_settings_with_status():
     except NotificationSettingsError as exc:
         saved = {}
         database_error = str(exc)
-    settings = {
-        key: saved.get(key, "").strip() or os.environ.get(key, "").strip()
-        for key in NOTIFICATION_FIELDS
-    }
+    settings = {}
+    for key in NOTIFICATION_FIELDS:
+        if key == "NOTIFICATIONS_ENABLED":
+            settings[key] = "0" if saved.get(key, "1").strip() == "0" else "1"
+        else:
+            settings[key] = saved.get(key, "").strip() or os.environ.get(key, "").strip()
     return settings, database_error
 
 
@@ -4772,6 +4820,9 @@ def salvar_notificacoes():
     try:
         settings = notification_settings()
         for key in NOTIFICATION_FIELDS:
+            if key == "NOTIFICATIONS_ENABLED":
+                settings[key] = "1" if request.form.get(key) == "1" else "0"
+                continue
             value = request.form.get(key, '').strip()
             if key.endswith('TOKEN') and not value:
                 continue  # Campo secreto vazio preserva a credencial já salva.
@@ -4844,6 +4895,9 @@ def notify_scheduled_result(history_id):
         message = f"Enviei vídeo {number} para rascunho no TikTok às {schedule_now():%H:%M} - Título: {title} - Sem link público; finalize no aplicativo."
     else:
         message = f"ERRO ao postar vídeo {number} no {platform} - Motivo: {item['message']}"
+    settings, _ = notification_settings_with_status()
+    if settings.get("NOTIFICATIONS_ENABLED", "1") == "0":
+        return
     with AUTPOST_STORE._connection() as db:
         claimed = db.execute('INSERT OR IGNORE INTO notification_events VALUES(?,?,?,?,?)',
             (history_id,item['status'],message,'Envio de aviso iniciado',schedule_now().isoformat()))
@@ -4851,7 +4905,6 @@ def notify_scheduled_result(history_id):
             return
     results = []
     try:
-        settings, _ = notification_settings_with_status()
         def send(url, payload, headers=None):
             req = Request(url, data=json.dumps(payload).encode('utf-8'),
                           headers={'Content-Type':'application/json', **(headers or {})})

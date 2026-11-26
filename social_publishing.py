@@ -3,6 +3,7 @@ import hashlib
 import json
 import mimetypes
 import os
+import re
 import secrets
 import tempfile
 import threading
@@ -20,6 +21,13 @@ _DEFAULT_SOCIAL_TOKENS_FILE = os.path.join(
 )
 SOCIAL_TOKENS_FILE = _DEFAULT_SOCIAL_TOKENS_FILE
 SOCIAL_TOKENS_LOCK = threading.RLock()
+TIKTOK_STATS_REQUIRED_SCOPES = {
+    "user.info.basic",
+    "user.info.profile",
+    "user.info.stats",
+    "video.list",
+}
+TIKTOK_POSTING_REQUIRED_SCOPES = {"video.upload"}
 _TOKEN_BACKEND = None
 
 TIKTOK_AUTHORIZE_URL = "https://www.tiktok.com/v2/auth/authorize/"
@@ -287,6 +295,24 @@ def delete_social_token(platform):
             save_social_tokens(tokens)
 
 
+def update_social_token_profile_data(platform, updates):
+    if platform not in {"tiktok", "youtube", "instagram"} or not isinstance(updates, dict):
+        raise SocialPublishingError("Dados de perfil social inválidos.")
+    with SOCIAL_TOKENS_LOCK:
+        tokens = load_social_tokens()
+        token_data = tokens.get(platform)
+        if not token_data:
+            return False
+        profile_data = token_data.get("profile_data")
+        if not isinstance(profile_data, dict):
+            profile_data = {}
+        profile_data.update(updates)
+        token_data["profile_data"] = profile_data
+        tokens[platform] = token_data
+        save_social_tokens(tokens)
+    return True
+
+
 def _extract_user_email(data, token_response=None):
     for source in (data, token_response):
         if isinstance(source, dict):
@@ -341,10 +367,23 @@ def store_authorized_tokens(platform, token_response):
         except (TypeError, ValueError) as exc:
             raise SocialPublishingError("A plataforma retornou um prazo de token inválido.") from exc
         user_email = _extract_user_email(data, token_response)
-        profile_data = data.get("profile_data", previous.get("profile_data", {}))
+        previous_profile_data = previous.get("profile_data", {})
+        profile_data = dict(previous_profile_data) if isinstance(previous_profile_data, dict) else {}
+        new_profile_data = data.get("profile_data", {})
+        if isinstance(new_profile_data, dict):
+            profile_data.update(new_profile_data)
         if platform == "tiktok" and data.get("open_id"):
             profile_data = {**(profile_data if isinstance(profile_data, dict) else {}),
                             "account_id": data["open_id"]}
+        if platform == "tiktok" and isinstance(data.get("scope"), (str, list, tuple)):
+            raw_scopes = data["scope"]
+            scope_values = raw_scopes if isinstance(raw_scopes, (list, tuple)) else re.split(r"[,\s]+", raw_scopes)
+            granted_scopes = {str(scope).strip() for scope in scope_values if str(scope).strip()}
+            profile_data["granted_scopes"] = sorted(granted_scopes)
+            profile_data["tiktok_stats_scopes_known"] = True
+            profile_data["tiktok_stats_reconnect_required"] = not TIKTOK_STATS_REQUIRED_SCOPES.issubset(granted_scopes)
+            profile_data["tiktok_posting_scope_missing"] = not TIKTOK_POSTING_REQUIRED_SCOPES.issubset(granted_scopes)
+            profile_data["tiktok_stats_scope_verified"] = False
         tokens[platform] = {
             "access_token": data["access_token"],
             "refresh_token": refresh_token,
@@ -384,6 +423,7 @@ def authorization_url(platform, state, code_challenge=None, redirect_uri_overrid
             or any(character not in challenge_characters for character in code_challenge)
         ):
             raise SocialPublishingError("O desafio PKCE do TikTok não está em um formato válido.")
+        # TikTok protects video/list and video/query with video.list; video.info is not an OAuth scope.
         params = {
             "client_key": client_id,
             "response_type": "code",
@@ -535,6 +575,19 @@ def exchange_authorization_code(
         raise SocialPublishingError("A plataforma retornou uma resposta de autorização inválida.")
     if token_response.get("error"):
         raise SocialPublishingError(_response_message(body, "A plataforma recusou a autorização."))
+    if platform == "tiktok":
+        token_data = token_response.get("data", token_response)
+        token_data = dict(token_data)
+        profile_data = token_data.get("profile_data")
+        profile_data = dict(profile_data) if isinstance(profile_data, dict) else {}
+        profile_data.update({
+            "tiktok_stats_scope_verified": False,
+            "tiktok_stats_reconnect_required": False,
+        })
+        if "scope" not in token_data:
+            profile_data["tiktok_stats_scopes_known"] = False
+        token_data["profile_data"] = profile_data
+        token_response = {**token_response, "data": token_data} if "data" in token_response else token_data
     store_authorized_tokens(platform, token_response)
 
 

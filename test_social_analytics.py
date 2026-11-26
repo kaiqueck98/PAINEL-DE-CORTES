@@ -56,6 +56,93 @@ class SocialAnalyticsTests(unittest.TestCase):
         self.assertIn("completed_at", initial_job)
         self.assertNotIn("secret-value", str(initial_job["errors"]))
 
+    def test_tiktok_scope_error_requires_reconnect_and_hides_stale_metrics(self):
+        job = {
+            "running": True, "message": "", "errors": {},
+            "started_at": None, "completed_at": None,
+        }
+        token = {"profile_data": {"account_id": "account-1"}}
+        with patch.object(app, "SOCIAL_ANALYTICS_JOB", job), patch.object(
+            app, "_social_analytics_tokens", return_value={"tiktok": token}
+        ), patch.object(
+            app.social_publishing, "get_access_token", return_value="access-token"
+        ), patch.object(
+            app.social_analytics, "fetch_tiktok_analytics",
+            side_effect=social_analytics.SocialAnalyticsError(
+                "The user did not authorize the scope required"
+            ),
+        ), patch.object(
+            app.social_publishing, "update_social_token_profile_data"
+        ) as update_profile:
+            app._refresh_social_analytics_worker()
+
+        update_profile.assert_called_once_with("tiktok", {
+            "tiktok_stats_scope_verified": False,
+            "tiktok_stats_reconnect_required": True,
+        })
+        self.assertIn("Reconectar TikTok", job["errors"]["tiktok"])
+
+        with tempfile.TemporaryDirectory() as directory:
+            engine = create_engine(f"sqlite:///{os.path.join(directory, 'analytics.sqlite3')}")
+            app.TokenBase.metadata.create_all(engine)
+            session_local = sessionmaker(bind=engine, expire_on_commit=False)
+            session_db = session_local()
+            session_db.add(app.SocialAnalyticsSnapshot(
+                platform="tiktok", account_id="account-1", snapshot_date="2026-11-26",
+                username="diverso_clips", followers=100, views=900,
+                likes=80, comments=5, shares=4, refreshed_at=datetime.now(timezone.utc),
+            ))
+            session_db.commit()
+            session_db.close()
+            with patch.object(app, "TokenSessionLocal", session_local):
+                summary = app.social_analytics_summary({
+                    "tiktok": {"profile_data": {
+                        "account_id": "account-1",
+                        "tiktok_stats_reconnect_required": True,
+                    }}
+                })
+            engine.dispose()
+
+        self.assertTrue(summary["tiktok_reconnect_required"])
+        self.assertEqual(summary["totals"]["views"], "—")
+        self.assertEqual(summary["totals"]["followers"], "—")
+        self.assertEqual(summary["top_videos"], [])
+        self.assertTrue(all(row["tiktok"] is None for row in summary["chart_days"]))
+
+    def test_reauthorized_tiktok_scope_check_unlocks_real_metrics(self):
+        job = {
+            "running": True, "message": "", "errors": {},
+            "started_at": None, "completed_at": None,
+        }
+        token = {"profile_data": {
+            "tiktok_stats_scope_verified": False,
+            "tiktok_stats_reconnect_required": False,
+        }}
+        report = {
+            "platform": "tiktok", "account_id": "account-1", "username": "diverso_clips",
+            "followers": 12, "views": 300, "likes": 40, "comments": 3,
+            "shares": 2, "media": [], "daily_views": {},
+        }
+        with patch.object(app, "SOCIAL_ANALYTICS_JOB", job), patch.object(
+            app, "_social_analytics_tokens", return_value={"tiktok": token}
+        ), patch.object(
+            app.social_publishing, "get_access_token", return_value="new-access-token"
+        ), patch.object(
+            app.social_analytics, "fetch_tiktok_analytics", return_value=report
+        ), patch.object(
+            app.social_publishing, "update_social_token_profile_data", return_value=True
+        ) as update_profile, patch.object(
+            app, "save_social_analytics_snapshot"
+        ), patch.object(app, "social_analytics_source_folders", return_value={}):
+            app._refresh_social_analytics_worker()
+
+        update_profile.assert_called_once_with("tiktok", {
+            "tiktok_stats_scope_verified": True,
+            "tiktok_stats_reconnect_required": False,
+        })
+        self.assertEqual(job["errors"], {})
+        self.assertIn("APIs oficiais", job["message"])
+
     def test_instagram_token_and_account_metadata_are_encrypted_in_server_database(self):
         key = Fernet.generate_key().decode("ascii")
         with tempfile.TemporaryDirectory() as directory:
@@ -174,7 +261,10 @@ class SocialAnalyticsTests(unittest.TestCase):
                 with patch.object(app, "schedule_now", return_value=second_day):
                     app.save_social_analytics_snapshot(second_report, {"remote-1": "FRUTAS"})
                     summary = app.social_analytics_summary({
-                        "tiktok": {"profile_data": {"account_id": "account-1"}}
+                        "tiktok": {"profile_data": {
+                            "account_id": "account-1",
+                            "tiktok_stats_scope_verified": True,
+                        }}
                     })
             engine.dispose()
 
@@ -183,6 +273,35 @@ class SocialAnalyticsTests(unittest.TestCase):
         self.assertEqual(summary["top_videos"][0]["folder"], "FRUTAS")
         self.assertEqual(summary["chart_days"][-1]["tiktok"], 150)
         self.assertIsNone(summary["chart_days"][-2]["tiktok"])
+
+    def test_notification_toggle_and_credentials_are_saved_encrypted_in_server_database(self):
+        key = Fernet.generate_key().decode("ascii")
+        with tempfile.TemporaryDirectory() as directory:
+            engine = create_engine(f"sqlite:///{os.path.join(directory, 'settings.sqlite3')}")
+            app.TokenBase.metadata.create_all(engine)
+            session_local = sessionmaker(bind=engine, expire_on_commit=False)
+            settings = {field: "" for field in app.NOTIFICATION_FIELDS}
+            settings.update({
+                "NOTIFICATIONS_ENABLED": "0",
+                "TELEGRAM_BOT_TOKEN": "private-telegram-token",
+                "TELEGRAM_CHAT_ID": "chat-123",
+            })
+            with patch.dict(os.environ, {"SOCIAL_TOKEN_ENCRYPTION_KEY": key, "RENDER": ""}), patch.object(
+                app, "SOCIAL_TOKEN_ENCRYPTION_KEY_CONFIGURED", True
+            ), patch.object(app, "TokenSessionLocal", session_local):
+                app.save_notification_settings(settings)
+                session_db = session_local()
+                row = session_db.get(app.NotificationSetting, 1)
+                self.assertNotIn("private-telegram-token", row.value)
+                self.assertNotIn("TELEGRAM_BOT_TOKEN", row.value)
+                session_db.close()
+                loaded, error = app.notification_settings_with_status()
+            engine.dispose()
+
+        self.assertEqual(error, "")
+        self.assertEqual(loaded["NOTIFICATIONS_ENABLED"], "0")
+        self.assertEqual(loaded["TELEGRAM_BOT_TOKEN"], "private-telegram-token")
+        self.assertEqual(loaded["TELEGRAM_CHAT_ID"], "chat-123")
 
 
 if __name__ == "__main__":

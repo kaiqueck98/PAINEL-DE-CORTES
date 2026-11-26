@@ -133,8 +133,63 @@ class SocialPublishingTests(unittest.TestCase):
         )
         store_tokens.assert_called_once_with(
             "tiktok",
-            {"access_token": "access", "refresh_token": "refresh"},
+            {
+                "access_token": "access",
+                "refresh_token": "refresh",
+                "profile_data": {
+                    "tiktok_stats_scope_verified": False,
+                    "tiktok_stats_reconnect_required": False,
+                    "tiktok_stats_scopes_known": False,
+                },
+            },
         )
+
+    def test_tiktok_scopes_are_saved_and_checked_when_oauth_returns_them(self):
+        key = Fernet.generate_key().decode("ascii")
+        scope = "user.info.basic,user.info.profile,user.info.stats,video.list,video.upload"
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "tokens.enc")
+            with patch.dict(os.environ, {"SOCIAL_TOKEN_ENCRYPTION_KEY": key}), patch.object(
+                social_publishing, "SOCIAL_TOKENS_FILE", path
+            ):
+                social_publishing.store_authorized_tokens(
+                    "tiktok",
+                    {
+                        "access_token": "access",
+                        "refresh_token": "refresh",
+                        "open_id": "account-1",
+                        "scope": scope,
+                    },
+                )
+                saved = social_publishing.load_social_tokens()["tiktok"]
+
+        profile = saved["profile_data"]
+        self.assertTrue(profile["tiktok_stats_scopes_known"])
+        self.assertFalse(profile["tiktok_stats_reconnect_required"])
+        self.assertFalse(profile["tiktok_stats_scope_verified"])
+        self.assertFalse(profile["tiktok_posting_scope_missing"])
+        self.assertEqual(set(profile["granted_scopes"]), set(scope.split(",")))
+
+    def test_tiktok_token_missing_read_scope_is_marked_for_reconnection(self):
+        key = Fernet.generate_key().decode("ascii")
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "tokens.enc")
+            with patch.dict(os.environ, {"SOCIAL_TOKEN_ENCRYPTION_KEY": key}), patch.object(
+                social_publishing, "SOCIAL_TOKENS_FILE", path
+            ):
+                social_publishing.store_authorized_tokens(
+                    "tiktok",
+                    {
+                        "access_token": "access",
+                        "refresh_token": "refresh",
+                        "scope": "user.info.basic,video.upload",
+                    },
+                )
+                profile = social_publishing.load_social_tokens()["tiktok"]["profile_data"]
+
+        self.assertTrue(profile["tiktok_stats_scopes_known"])
+        self.assertTrue(profile["tiktok_stats_reconnect_required"])
+        self.assertTrue(profile["tiktok_posting_scope_missing"] is False)
 
     def test_instagram_authorization_requests_official_insights_permissions(self):
         with patch.dict(

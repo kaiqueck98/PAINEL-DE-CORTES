@@ -391,7 +391,7 @@ class PanelRouteTests(unittest.TestCase):
         self.assertIn(b"page=clips&amp;path=root123,child123,nested123", response.data)
         self.assertNotIn(b"Corte pronto.mp4", response.data)
 
-    def test_statistics_show_only_social_metrics_and_connect_buttons_when_disconnected(self):
+    def test_statistics_show_only_social_metrics_and_settings_link_when_disconnected(self):
         with patch.object(app.social_publishing, "load_social_tokens", return_value={}), patch.object(
             app, "get_folder_view"
         ) as get_folder_view:
@@ -405,13 +405,105 @@ class PanelRouteTests(unittest.TestCase):
         self.assertIn("Total de compartilhamentos", page)
         self.assertIn("Seguidores", page)
         self.assertIn("Taxa de engajamento", page)
-        self.assertIn("Conectar TikTok", page)
-        self.assertIn("Conectar Instagram", page)
+        self.assertIn("Conecte suas contas em Configurações", page)
+        self.assertIn("Ir para Configurações", page)
+        self.assertNotIn("Conectar TikTok", page)
+        self.assertNotIn("Conectar Instagram", page)
+        self.assertNotIn("start_social_oauth", page)
         self.assertNotIn("Total de cortes", page)
         self.assertNotIn("Pastas encontradas", page)
         self.assertNotIn("Marcados como postados", page)
         self.assertIn("—", page)
         get_folder_view.assert_not_called()
+
+    def test_tiktok_scope_error_replaces_statistics_chart_with_settings_reconnect_message(self):
+        stats = {
+            "connected": [],
+            "totals": {key: "—" for key in ("views", "likes", "comments", "shares", "followers", "engagement_rate")},
+            "chart_days": [], "top_videos": [], "updated_at": "",
+            "job": {"running": False, "message": "", "errors": {}, "started_at": None, "completed_at": None},
+            "has_data": False, "has_connected": True, "usernames": {},
+            "tiktok_reconnect_required": True, "tiktok_scope_check_pending": False,
+        }
+        tokens = {"tiktok": {"access_token": "token", "refresh_token": "refresh", "expires_at": None}}
+        with patch.object(app.social_publishing, "load_social_tokens", return_value=tokens), patch.object(
+            app, "maybe_start_social_analytics_refresh"
+        ), patch.object(app, "social_analytics_summary", return_value=stats):
+            response = self.client.get("/dashboard?page=stats")
+
+        page = response.get_data(as_text=True)
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("Conecte o TikTok de novo para ver as estatísticas", page)
+        self.assertIn("Ir para Configurações", page)
+        self.assertNotIn('id="social-stats-chart"', page)
+        self.assertNotIn("start_social_oauth", page)
+
+    def test_configuration_collects_social_notifications_telegram_and_password(self):
+        settings = {key: "" for key in app.NOTIFICATION_FIELDS}
+        settings["NOTIFICATIONS_ENABLED"] = "1"
+        with patch.object(app.social_publishing, "load_social_tokens", return_value={}), patch.object(
+            app, "notification_settings_with_status", return_value=(settings, "")
+        ):
+            response = self.client.get("/configuracao")
+
+        page = response.get_data(as_text=True)
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("Pasta principal do Google Drive", page)
+        self.assertIn("Conectar TikTok", page)
+        self.assertIn("Conectar Instagram", page)
+        self.assertIn("Conectar YouTube", page)
+        self.assertIn("Não conectado", page)
+        self.assertIn('name="NOTIFICATIONS_ENABLED"', page)
+        self.assertIn("Token do bot do Telegram", page)
+        self.assertIn("TESTAR TELEGRAM", page)
+        self.assertIn("Senha atual", page)
+        self.assertIn("Nova senha", page)
+        sections = [
+            page.index("Pasta principal do Google Drive"),
+            page.index("Conectar redes sociais"),
+            page.index("Configurações de avisos"),
+            page.index("TESTAR TELEGRAM"),
+            page.index("Alterar senha"),
+        ]
+        self.assertEqual(sections, sorted(sections))
+
+    def test_notification_toggle_is_saved_server_side(self):
+        with self.client.session_transaction() as browser_session:
+            browser_session["csrf_token"] = "csrf-test"
+        settings = {key: "" for key in app.NOTIFICATION_FIELDS}
+        settings["NOTIFICATIONS_ENABLED"] = "1"
+        with patch.object(app, "notification_settings", return_value=settings), patch.object(
+            app, "save_notification_settings"
+        ) as save_settings:
+            response = self.client.post(
+                "/agendamento/notificacoes",
+                data={"csrf_token": "csrf-test"},
+            )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(save_settings.call_args.args[0]["NOTIFICATIONS_ENABLED"], "0")
+
+    def test_automatic_and_clips_pages_have_no_configuration_controls_when_drive_is_missing(self):
+        previous_testing = app.app.testing
+        app.app.testing = True
+        self.addCleanup(setattr, app.app, "testing", previous_testing)
+        with patch.object(app, "load_drive_folder_link", return_value=""):
+            automatic = self.client.get("/dashboard?page=automatic")
+            clips = self.client.get("/dashboard?page=clips")
+
+        for response in (automatic, clips):
+            self.assertEqual(response.status_code, 200)
+            self.assertNotIn(b'name="folder_link"', response.data)
+            self.assertNotIn(b"start_social_oauth", response.data)
+            self.assertNotIn(b"Abrir Configura", response.data)
+
+    def test_home_without_drive_has_only_settings_link_not_a_drive_field(self):
+        with patch.object(app, "load_drive_folder_link", return_value=""):
+            response = self.client.get("/dashboard?page=home")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Abrir Configura", response.data)
+        self.assertNotIn(b'name="folder_link"', response.data)
 
     def test_disconnect_clears_saved_analytics_and_stats_request_connection(self):
         with self.client.session_transaction() as browser_session:
@@ -430,7 +522,9 @@ class PanelRouteTests(unittest.TestCase):
         delete_token.assert_called_once_with("tiktok")
         clear_analytics.assert_called_once_with("tiktok")
         page = stats.get_data(as_text=True)
-        self.assertIn("Conectar TikTok", page)
+        self.assertIn("Conecte suas contas em Configurações", page)
+        self.assertIn("Ir para Configurações", page)
+        self.assertNotIn("Conectar TikTok", page)
         self.assertIn("—", page)
 
     def test_mark_good_persists_video_id_to_json_file(self):
@@ -697,8 +791,9 @@ class PanelRouteTests(unittest.TestCase):
         ):
             response = self.client.get("/configuracao")
 
-        self.assertIn(b"TikTok conectado \xe2\x9c\x85", response.data)
-        self.assertIn(b"YouTube conectado \xe2\x9c\x85", response.data)
+        self.assertIn(b"Conectado", response.data)
+        self.assertIn(b"Reconectar TikTok", response.data)
+        self.assertIn(b"Reconectar YouTube", response.data)
 
     def test_connected_tiktok_shows_inbox_draft_instructions(self):
         with patch.object(
