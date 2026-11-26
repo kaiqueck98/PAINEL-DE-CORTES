@@ -2968,6 +2968,14 @@ label{display:block;font-weight:600}.hero button{width:100%;font-size:18px}img{w
 .analysis-progress.is-success{border-color:#24945b;background:#14291f;color:#c5f7d8}
 .analysis-progress.is-success progress{accent-color:#22c55e}
 .video-preview{display:block;width:100%;max-width:720px;margin:14px 0;border-radius:12px;background:#000}
+.video-preview-modal{position:fixed;inset:0;z-index:1000;display:grid;place-items:center;padding:18px;background:rgba(0,0,0,.82)}
+.video-preview-modal[hidden]{display:none}
+.video-preview-dialog{width:min(900px,100%);max-height:calc(100vh - 36px);overflow:auto;padding:22px;border:1px solid #485572;border-radius:16px;background:#151d2c}
+.video-preview-dialog header{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.video-preview-dialog h2{margin:0}
+.video-preview-close-x{width:44px;height:44px;padding:0;font-size:22px}
+.video-preview-dialog .video-preview{max-height:70vh;max-width:100%;margin:16px 0}
+.video-preview-close-button{width:100%;margin-top:12px}
 @media (min-width:761px) and (max-width:1391px){main{max-width:none;width:min(1040px,calc(100% - 208px));margin-left:192px;margin-right:16px}}
 @media (max-width:760px){.automatic-sidebar{top:8px;left:8px;right:8px;width:auto;grid-template-columns:repeat(2,minmax(0,1fr));padding:8px}.automatic-sidebar a{text-align:center}main{padding-top:104px}}
 </style></head><body>
@@ -3043,8 +3051,57 @@ TITLE_EDITOR_SCRIPT = r"""
   host.append(progressCard);
   const body = document.createElement('div'); host.append(body);
   (document.querySelector('main') || document.body).append(host);
+  const previewModal = document.createElement('div');
+  previewModal.className = 'video-preview-modal';
+  previewModal.hidden = true;
+  previewModal.tabIndex = -1;
+  previewModal.setAttribute('role', 'dialog');
+  previewModal.setAttribute('aria-modal', 'true');
+  previewModal.setAttribute('aria-labelledby', 'video-preview-title');
+  const previewDialog = document.createElement('section');
+  previewDialog.className = 'video-preview-dialog';
+  const previewHeader = document.createElement('header');
+  const previewTitle = document.createElement('h2');
+  previewTitle.id = 'video-preview-title';
+  const closePreviewX = document.createElement('button');
+  closePreviewX.type = 'button';
+  closePreviewX.className = 'video-preview-close-x';
+  closePreviewX.setAttribute('aria-label', 'Fechar prévia');
+  closePreviewX.textContent = 'X';
+  const previewPlayer = document.createElement('video');
+  previewPlayer.className = 'video-preview';
+  previewPlayer.controls = true;
+  previewPlayer.preload = 'metadata';
+  previewPlayer.playsInline = true;
+  const previewJapanese = document.createElement('p');
+  const previewTranslation = document.createElement('p');
+  const closePreviewButton = document.createElement('button');
+  closePreviewButton.type = 'button';
+  closePreviewButton.className = 'video-preview-close-button';
+  closePreviewButton.textContent = 'Fechar';
+  previewHeader.append(previewTitle, closePreviewX);
+  previewDialog.append(previewHeader, previewPlayer, previewJapanese, previewTranslation, closePreviewButton);
+  previewModal.append(previewDialog);
+  document.body.append(previewModal);
+  let previewOpener = null;
+  function closeVideoPreview(event) {
+    event?.preventDefault();
+    if (previewModal.hidden) return;
+    previewModal.hidden = true;
+    previewPlayer.pause();
+    previewPlayer.removeAttribute('src');
+    previewPlayer.load();
+    previewOpener?.focus();
+    previewOpener = null;
+  }
+  closePreviewX.onclick = closeVideoPreview;
+  closePreviewButton.onclick = closeVideoPreview;
+  previewModal.addEventListener('keydown', event => {
+    if (event.key === 'Escape') event.preventDefault();
+  });
   let editing = false;
   async function refreshContent() {
+    if (!previewModal.hidden) {setTimeout(refreshContent,5000); return;}
     if(editing) {setTimeout(refreshContent,5000); return;}
     try {
       const response = await fetch('__CONTENT_ENDPOINT__', {headers: {
@@ -3052,6 +3109,7 @@ TITLE_EDITOR_SCRIPT = r"""
       }, cache: 'no-store'});
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || 'Erro ao consultar análise');
+      if (!previewModal.hidden) return;
       const currentDay = [...data.content.days].sort(
         (a, b) => (b.updated || 0) - (a.updated || 0)
       )[0];
@@ -3088,29 +3146,18 @@ TITLE_EDITOR_SCRIPT = r"""
         button.type = 'button';
         button.textContent = 'VER PRÉVIA';
         button.style.margin = '8px 4px';
-        button.onclick = () => {
-          const current = card.querySelector('[data-video-preview]');
-          if (current) { current.remove(); button.textContent = 'VER PRÉVIA'; return; }
-          const preview = document.createElement('div');
-          preview.dataset.videoPreview = 'true';
-          const title = document.createElement('h4');
-          title.textContent = copy.title || 'Título indisponível';
-          const player = document.createElement('video');
-          player.className = 'video-preview';
-          player.controls = true;
-          player.preload = 'metadata';
-          player.playsInline = true;
-          player.src = '__COVER_ENDPOINT__'.replace('SHA', video.sha256)
-            + '?video=1&revision=' + encodeURIComponent(revision || '');
-          const japanese = document.createElement('p');
-          japanese.textContent = 'Descrição (japonês): '
+        button.onclick = event => {
+          event.preventDefault();
+          previewOpener = button;
+          previewTitle.textContent = copy.title || 'Título indisponível';
+          previewJapanese.textContent = 'Descrição (japonês): '
             + (copy.description_japanese || copy.japanese?.description_japanese || 'Indisponível');
-          const translation = document.createElement('p');
-          translation.textContent = 'Tradução (português): '
+          previewTranslation.textContent = 'Tradução (português): '
             + (copy.description_translation || copy.japanese?.description_translation || 'Indisponível');
-          preview.append(title, player, japanese, translation);
-          card.append(preview);
-          button.textContent = 'FECHAR PRÉVIA';
+          previewPlayer.src = '__COVER_ENDPOINT__'.replace('SHA', video.sha256)
+            + '?video=1&revision=' + encodeURIComponent(revision || '');
+          previewModal.hidden = false;
+          closePreviewX.focus();
         };
         card.append(button);
       }

@@ -830,6 +830,35 @@ class ScreenTests(StoreTests):
             self.assertNotIn(technical, card_renderer)
         self.assertNotIn("day.status + ': ' + day.message", script)
 
+    def test_automatic_preview_modal_stays_open_during_polling(self):
+        tree = ast.parse((ROOT / "app.py").read_text(encoding="utf-8-sig"))
+        script_node = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.Assign)
+            and any(
+                isinstance(target, ast.Name) and target.id == "TITLE_EDITOR_SCRIPT"
+                for target in node.targets
+            )
+        )
+        script = ast.literal_eval(script_node.value)
+
+        self.assertIn("previewModal.setAttribute('aria-modal', 'true')", script)
+        self.assertIn("closePreviewX.textContent = 'X'", script)
+        self.assertIn("closePreviewButton.textContent = 'Fechar'", script)
+        self.assertIn("previewPlayer.controls = true", script)
+        self.assertIn("previewPlayer.preload = 'metadata'", script)
+        self.assertIn("previewPlayer.playsInline = true", script)
+        self.assertIn("button.type = 'button'", script)
+        self.assertIn("event.preventDefault()", script)
+        self.assertIn("if (!previewModal.hidden) {setTimeout(refreshContent,5000); return;}", script)
+        self.assertIn("if (!previewModal.hidden) return;", script)
+        self.assertLess(script.index("if (!previewModal.hidden) return;"), script.index("body.replaceChildren()"))
+        self.assertNotIn("autoplay", script.lower())
+        self.assertNotIn("previewPlayer.addEventListener('ended'", script)
+        self.assertNotIn("previewModal.onclick", script)
+        self.assertNotIn("event.target === previewModal", script)
+
     def test_processed_preview_route_serves_only_the_prepared_report_media(self):
         from flask import Flask, request, send_file, session
 
