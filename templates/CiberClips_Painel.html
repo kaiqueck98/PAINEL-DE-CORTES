@@ -90,8 +90,14 @@
     .automatic-video-card img{display:block;width:100%;aspect-ratio:16/9;object-fit:cover;border-radius:9px;margin:0 0 14px;background:#09080d}
     .automatic-video-card h3{overflow-wrap:anywhere}
     .automatic-video-card .queue-placeholder{display:grid;place-items:center;aspect-ratio:16/9;margin-bottom:14px;border-radius:9px;background:#100e17;color:#8f899e}
+    #clips-grid .queue-placeholder{display:grid;place-items:center;aspect-ratio:16/9;margin-bottom:14px;border-radius:9px;background:#100e17;color:#8f899e}
     .automatic-video-card .queue-status{font-weight:700;color:#d8d3e5}
     .automatic-skipped summary{cursor:pointer}
+    .library-controls-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(220px,.6fr);gap:14px;align-items:end}
+    .library-controls-grid label{display:block}
+    .library-controls-grid input,.library-controls-grid select{margin-bottom:0}
+    .library-count{margin:14px 0 0}
+    #clips-load-more{display:block;margin:20px auto}
     .video-preview-modal{position:fixed;inset:0;z-index:1000;display:grid;place-items:center;padding:18px;background:rgba(0,0,0,.82)}
     .video-preview-modal[hidden]{display:none}
     .video-preview-dialog{width:min(900px,100%);max-height:calc(100vh - 36px);overflow:auto;padding:22px;border:1px solid #485572;border-radius:16px;background:#15131e}
@@ -122,6 +128,7 @@
       .metric{font-size:24px}
       .form-row{align-items:stretch;flex-direction:column}
       .form-actions button{flex:1}
+      .library-controls-grid{grid-template-columns:1fr}
     }
   </style>
 </head>
@@ -308,51 +315,45 @@
             </div>
           {% endif %}
         {% elif panel_page == 'clips' %}
-          <div id="content">
+          <div id="clips-library" data-endpoint="{{ url_for('clips_library_api') }}">
             <div class="banner">
-              <small>SEU ESTÚDIO DIGITAL</small>
+              <small>SEU EST&Uacute;DIO DIGITAL</small>
               <h1>Meus cortes</h1>
-              <p>{{ current_folder_name or 'Biblioteca de vídeos do Google Drive' }} · sua biblioteca de cortes.</p>
+              <p>Todos os v&iacute;deos da biblioteca, organizados em p&aacute;ginas.</p>
             </div>
             {% if error %}<div class="message" role="alert">{{ error }}</div>{% endif %}
             {% if not drive_link_saved %}
               <section class="card">
                 <h3>Configure a pasta do Google Drive</h3>
-                <p>Salve a pasta principal nas Configurações para carregar a biblioteca.</p>
-                <a class="connection-link" href="{{ url_for('configuration') }}">Abrir Configurações</a>
+                <p>Salve a pasta principal nas Configura&ccedil;&otilde;es para carregar a biblioteca.</p>
+                <a class="connection-link" href="{{ url_for('configuration') }}">Abrir Configura&ccedil;&otilde;es</a>
               </section>
-            {% elif view %}
-              <section class="card">
-                <div class="row"><h3>{{ current_folder_name }}</h3><small>{{ view.video_count }} vídeo(s)</small></div>
-                {% if path_string and not is_root_view %}<a class="connection-link" href="{{ url_for('dashboard', page='home', path=parent_path_string or None) }}">← Voltar para pastas</a>{% endif %}
-              </section>
-              {% if view.folders %}
-                <div class="folder-grid">
-                  {% for folder in view.folders %}
-                    <a class="folder-card" href="{{ url_for('dashboard', page='clips', path=path_string ~ ',' ~ folder.id) }}">
-                      <span class="folder-icon" aria-hidden="true">▰</span>
-                      <h3>{{ folder.name }}</h3><small>{{ folder.video_count }} vídeo(s)</small>
-                    </a>
-                  {% endfor %}
-                </div>
-              {% endif %}
-              {% if view.videos %}
-                <div class="clip-grid">
-                  {% for video in view.videos %}
-                    <article class="card clip-card">
-                      {% if video.thumbnailLink %}<img src="{{ video.thumbnailLink }}" alt="Miniatura: {{ video.name }}" loading="lazy">{% else %}<div class="queue-placeholder">▶</div>{% endif %}
-                      <h3>{{ video.name }}</h3>
-                      <p>{{ video.resolution }} · {{ video.videoMediaMetadata|duration }}</p>
-                      <a class="connection-link" href="{{ video.webViewLink or ('https://drive.google.com/file/d/' ~ video.id ~ '/view') }}" target="_blank" rel="noopener noreferrer">Abrir vídeo</a>
-                      <a class="connection-link" href="{{ url_for('download_video', video_id=video.id, filename=video.name) }}">Baixar vídeo</a>
-                    </article>
-                  {% endfor %}
-                </div>
-              {% elif not view.folders %}
-                <section class="card"><p>Nenhum vídeo foi encontrado nesta pasta.</p></section>
-              {% endif %}
             {% else %}
-              <section class="card"><p>Não foi possível carregar os vídeos da pasta.</p></section>
+              <section class="card library-controls">
+                <div class="library-controls-grid">
+                  <label for="clips-search">Buscar v&iacute;deos
+                    <input id="clips-search" type="search" placeholder="Buscar pelo nome do v&iacute;deo..." autocomplete="off">
+                  </label>
+                  <label for="clips-folder">Filtrar por pasta
+                    <select id="clips-folder"><option value="">Todas as pastas</option></select>
+                  </label>
+                </div>
+                <p id="clips-count" class="library-count" role="status">Carregando v&iacute;deos...</p>
+              </section>
+              <p id="clips-warning" class="message" role="status" hidden></p>
+              <div id="clips-grid" class="clip-grid" aria-live="polite"></div>
+              <p id="clips-load-status" role="status">Buscando v&iacute;deos...</p>
+              <button id="clips-load-more" type="button" hidden>Carregar mais</button>
+              <div id="clips-preview-modal" class="video-preview-modal" hidden tabindex="-1" role="dialog" aria-modal="true" aria-labelledby="clips-preview-title">
+                <section class="video-preview-dialog">
+                  <header>
+                    <h2 id="clips-preview-title"></h2>
+                    <button id="clips-preview-close-x" class="video-preview-close-x" type="button" aria-label="Fechar pr&eacute;via">X</button>
+                  </header>
+                  <video id="clips-preview-player" class="video-preview" controls playsinline preload="metadata"></video>
+                  <button id="clips-preview-close" class="video-preview-close-button" type="button">Fechar</button>
+                </section>
+              </div>
             {% endif %}
           </div>
         {% elif panel_page == 'stats' %}
@@ -420,6 +421,9 @@
     </div>
     {% if panel_page == 'automatic' and automatic_script %}
       {{ automatic_script|safe }}
+    {% endif %}
+    {% if panel_page == 'clips' and clips_library_script %}
+      {{ clips_library_script|safe }}
     {% endif %}
   {% endif %}
 </body>

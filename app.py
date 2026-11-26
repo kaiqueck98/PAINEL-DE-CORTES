@@ -79,6 +79,9 @@ AUTPOST_STORE = autopost.AutopostStore(
 )
 AUTPOST_STORE.initialize()
 AUTOMATIC_PAGE_LOCK = threading.Lock()
+CLIPS_LIBRARY_CACHE = {}
+CLIPS_LIBRARY_CACHE_LOCK = threading.Lock()
+CLIPS_LIBRARY_CACHE_TTL = 120
 AUTPOST_SCHEDULER = BackgroundScheduler(timezone=AUTPOST_TIMEZONE)
 AUTPOST_SCHEDULER_LOCK = threading.Lock()
 AUTPOST_SCHEDULER_STARTED = False
@@ -399,6 +402,7 @@ def get_folder_view(folder_id, api_key):
                     pending.append(child_id)
             elif os.path.splitext(file.get("name", ""))[1].lower() in VIDEO_EXTENSIONS:
                 file["folderName"] = nodes[current_id]["name"]
+                file["folderId"] = current_id
                 nodes[current_id]["videos"].append(file)
 
     for node in reversed(list(nodes.values())):
@@ -421,6 +425,15 @@ def get_folder_view(folder_id, api_key):
                 "video_count": nodes[child_id]["video_count"],
             }
             for child_id in current["children"]
+        ],
+        "all_folders": [
+            {
+                "id": node["id"],
+                "name": node["name"],
+                "video_count": node["video_count"],
+            }
+            for node in nodes.values()
+            if node["id"] != folder_id
         ],
         "videos": current["videos"],
         "video_count": current["video_count"],
@@ -887,6 +900,40 @@ def ensure_automatic_dashboard_schedule(folder_link):
         return AUTPOST_STORE.get_schedule(schedule_id)
 
 
+def get_clips_library_index(folder_id, api_key):
+    now = time.monotonic()
+    with CLIPS_LIBRARY_CACHE_LOCK:
+        cached = CLIPS_LIBRARY_CACHE.get(folder_id)
+        if cached and now - cached["loaded_at"] < CLIPS_LIBRARY_CACHE_TTL:
+            return cached
+        view = get_folder_view(folder_id, api_key)
+        videos = sorted(
+            view.get("all_videos", []),
+            key=lambda video: (video.get("name", "").casefold(), video.get("id", "")),
+        )
+        folders_by_id = {
+            folder["id"]: {"id": folder["id"], "name": folder["name"]}
+            for folder in view.get("all_folders", [])
+        }
+        if any(video.get("folderId") == folder_id for video in videos):
+            folders_by_id[folder_id] = {
+                "id": folder_id,
+                "name": view.get("folder_name", "Pasta principal"),
+            }
+        index = {
+            "loaded_at": now,
+            "folder_name": view.get("folder_name", "Pasta principal"),
+            "videos": videos,
+            "folders": sorted(
+                folders_by_id.values(),
+                key=lambda folder: (folder["name"].casefold(), folder["id"]),
+            ),
+            "warnings": view.get("warnings", []),
+        }
+        CLIPS_LIBRARY_CACHE[folder_id] = index
+        return index
+
+
 @app.route("/", methods=["GET"], endpoint="login")
 def login():
     if session.get("authenticated") is True:
@@ -1173,6 +1220,7 @@ def index():
     folder_model = {}
     automatic_schedule = None
     automatic_script = ""
+    clips_library_script = ""
     panel_stats = {"videos": 0, "folders": 0, "posted": 0}
 
     if configuration_view and request.method == "GET":
@@ -1316,7 +1364,7 @@ def index():
             error = str(exc)
         except ValueError as exc:
             error = str(exc)
-    if path_ids and panel_page != "automatic":
+    if path_ids and panel_page not in {"automatic", "clips"}:
         folder_link = folder_link or f"https://drive.google.com/drive/folders/{path_ids[0]}"
         api_key = os.environ.get("DRIVE_API_KEY", "").strip()
         try:
@@ -1426,6 +1474,8 @@ def index():
             error = error or str(exc)
 
     drive_link_saved = drive_link_saved or bool(folder_link)
+    if dashboard_view and panel_page == "clips" and drive_link_saved:
+        clips_library_script = CLIPS_LIBRARY_SCRIPT
     if view:
         panel_stats["videos"] = int(view.get("video_count", len(view.get("videos", []))))
         panel_stats["folders"] = len(view.get("folders", []))
@@ -1461,8 +1511,76 @@ def index():
         panel_stats=panel_stats,
         automatic_schedule=automatic_schedule,
         automatic_script=automatic_script,
+        clips_library_script=clips_library_script,
         current_folder_id=path_ids[-1] if path_ids else "",
     )
+
+
+@app.route("/api/clips-library")
+def clips_library_api():
+    try:
+        folder_link = load_drive_folder_link()
+        if not folder_link:
+            return jsonify(error="Salve a pasta principal do Drive nas Configurações."), 400
+        folder_id = extract_folder_id(folder_link)
+        api_key = os.environ.get("DRIVE_API_KEY", "").strip()
+        if not api_key:
+            return jsonify(error="Configure DRIVE_API_KEY para carregar os vídeos."), 503
+        index = get_clips_library_index(folder_id, api_key)
+        folders = index["folders"]
+        selected_folder = request.args.get("folder", "").strip()
+        if selected_folder and not any(item["id"] == selected_folder for item in folders):
+            return jsonify(error="A pasta selecionada não está disponível."), 400
+        query = request.args.get("q", "").strip()[:120].casefold()
+        try:
+            offset = int(request.args.get("offset", "0"))
+        except (TypeError, ValueError):
+            return jsonify(error="Página inválida."), 400
+        if offset < 0:
+            return jsonify(error="Página inválida."), 400
+
+        matched = (
+            video for video in index["videos"]
+            if (not selected_folder or video.get("folderId") == selected_folder)
+            and (
+                not query
+                or query in video.get("name", "").casefold()
+                or query in video.get("folderName", "").casefold()
+            )
+        )
+        filtered = list(matched)
+        total = len(filtered)
+        page_size = 30
+        page_videos = filtered[offset:offset + page_size]
+        videos = []
+        for video in page_videos:
+            videos.append({
+                "id": video["id"],
+                "name": video.get("name", "Vídeo sem nome"),
+                "folder_id": video.get("folderId", folder_id),
+                "folder_name": video.get("folderName", index["folder_name"]),
+                "thumbnail": video.get("thumbnailLink", ""),
+                "duration": format_duration(video.get("videoMediaMetadata", {})),
+                "resolution": video_quality(video)[0],
+                "preview_url": url_for(
+                    "stream_original_video",
+                    video_id=video["id"],
+                    filename=video.get("name", "video.mp4"),
+                ),
+            })
+        next_offset = offset + len(videos) if offset + len(videos) < total else None
+        return jsonify(
+            videos=videos,
+            folders=folders,
+            total=total,
+            offset=offset,
+            next_offset=next_offset,
+            warnings=index["warnings"],
+        )
+    except (AutomationSettingsError, ValueError) as exc:
+        return jsonify(error=str(exc)), 400
+    except DriveError as exc:
+        return jsonify(error=str(exc)), 503
 
 
 def update_improvement_job(job_id, **updates):
@@ -3147,6 +3265,164 @@ Mantenha o servidor ligado. A nota é técnica, não uma previsão de alcance.</
 
 
 # Interface permanece no app.py para não alterar os outros templates.
+CLIPS_LIBRARY_SCRIPT = r"""
+<script>
+(() => {
+  const library = document.getElementById('clips-library');
+  if (!library) return;
+  const endpoint = library.dataset.endpoint;
+  const search = document.getElementById('clips-search');
+  const folderSelect = document.getElementById('clips-folder');
+  const grid = document.getElementById('clips-grid');
+  const count = document.getElementById('clips-count');
+  const status = document.getElementById('clips-load-status');
+  const warning = document.getElementById('clips-warning');
+  const loadMore = document.getElementById('clips-load-more');
+  const modal = document.getElementById('clips-preview-modal');
+  const previewTitle = document.getElementById('clips-preview-title');
+  const player = document.getElementById('clips-preview-player');
+  const csrf = () => document.querySelector('[name="csrf_token"]')?.value || '';
+  let nextOffset = 0;
+  let loading = false;
+  let requestVersion = 0;
+  let requestController = null;
+  let searchTimer = null;
+  let previewOpener = null;
+
+  function makeCard(video) {
+    const card = document.createElement('article');
+    card.className = 'card clip-card';
+    if (video.thumbnail) {
+      const image = document.createElement('img');
+      image.src = video.thumbnail;
+      image.alt = 'Miniatura: ' + video.name;
+      image.loading = 'lazy';
+      card.append(image);
+    } else {
+      const placeholder = document.createElement('div');
+      placeholder.className = 'queue-placeholder';
+      placeholder.textContent = '▶';
+      card.append(placeholder);
+    }
+    const title = document.createElement('h3');
+    title.textContent = video.name;
+    card.append(title);
+    const folder = document.createElement('p');
+    folder.textContent = 'Pasta: ' + video.folder_name;
+    card.append(folder);
+    const duration = document.createElement('p');
+    duration.textContent = 'Duração: ' + (video.duration || 'Indisponível');
+    card.append(duration);
+    const preview = document.createElement('button');
+    preview.type = 'button';
+    preview.textContent = 'VER PRÉVIA';
+    preview.onclick = () => openPreview(video, preview);
+    card.append(preview);
+    return card;
+  }
+
+  function populateFolders(folders) {
+    if (folderSelect.dataset.loaded === 'true') return;
+    for (const folder of folders || []) {
+      const option = document.createElement('option');
+      option.value = folder.id;
+      option.textContent = folder.name;
+      folderSelect.append(option);
+    }
+    folderSelect.dataset.loaded = 'true';
+  }
+
+  function showPreviewWarning(warnings) {
+    warning.hidden = !warnings?.length;
+    warning.textContent = warnings?.join(' ') || '';
+  }
+
+  async function loadPage(reset) {
+    if (loading && !reset) return;
+    if (reset) {
+      requestController?.abort();
+      requestVersion += 1;
+      loading = false;
+      nextOffset = 0;
+      grid.replaceChildren();
+      loadMore.hidden = true;
+      count.textContent = 'Carregando vídeos...';
+    }
+    const version = ++requestVersion;
+    const offset = reset ? 0 : nextOffset;
+    const params = new URLSearchParams({
+      offset: String(offset),
+      q: search.value.trim(),
+      folder: folderSelect.value,
+    });
+    requestController = new AbortController();
+    loading = true;
+    loadMore.disabled = true;
+    status.textContent = 'Carregando vídeos...';
+    try {
+      const response = await fetch(endpoint + '?' + params.toString(), {
+        headers: {'X-CSRF-Token': csrf()},
+        cache: 'no-store',
+        signal: requestController.signal,
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Não foi possível carregar os vídeos.');
+      if (version !== requestVersion) return;
+      populateFolders(data.folders);
+      showPreviewWarning(data.warnings);
+      for (const video of data.videos) grid.append(makeCard(video));
+      nextOffset = data.next_offset;
+      loadMore.hidden = nextOffset === null;
+      count.textContent = `Mostrando ${grid.children.length} de ${data.total} vídeos`;
+      status.textContent = data.total ? '' : 'Nenhum vídeo encontrado.';
+    } catch (error) {
+      if (error.name === 'AbortError' || version !== requestVersion) return;
+      status.textContent = error.message;
+      loadMore.hidden = true;
+    } finally {
+      if (version === requestVersion) {
+        loading = false;
+        loadMore.disabled = false;
+      }
+    }
+  }
+
+  function openPreview(video, opener) {
+    previewOpener = opener;
+    previewTitle.textContent = video.name;
+    player.src = video.preview_url;
+    modal.hidden = false;
+    document.getElementById('clips-preview-close-x').focus();
+  }
+
+  function closePreview(event) {
+    event?.preventDefault();
+    if (modal.hidden) return;
+    modal.hidden = true;
+    player.pause();
+    player.removeAttribute('src');
+    player.load();
+    previewOpener?.focus();
+    previewOpener = null;
+  }
+
+  document.getElementById('clips-preview-close-x').onclick = closePreview;
+  document.getElementById('clips-preview-close').onclick = closePreview;
+  modal.addEventListener('keydown', event => {
+    if (event.key === 'Escape') event.preventDefault();
+  });
+  search.addEventListener('input', () => {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => loadPage(true), 250);
+  });
+  folderSelect.addEventListener('change', () => loadPage(true));
+  loadMore.addEventListener('click', () => loadPage(false));
+  loadPage(true);
+})();
+</script>
+"""
+
+
 AUTOMATIC_QUEUE_SCRIPT = r"""
 <script>
 (() => {

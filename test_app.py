@@ -85,29 +85,89 @@ class PanelRouteTests(unittest.TestCase):
             self.assertEqual(schedules[0]["videos_per_day"], 4)
 
     def test_my_cuts_remains_a_drive_library_separate_from_automatic_queue(self):
-        view = {
-            "folder_name": "Minha biblioteca",
-            "folders": [],
-            "videos": [{
-                "id": "video123",
-                "name": "Corte da biblioteca.mp4",
-                "webViewLink": "https://drive.google.com/file/d/video123/view",
-                "videoMediaMetadata": {"durationMillis": "60000", "width": 1280, "height": 720},
-                "resolution": "1280x720",
-            }],
-            "video_count": 1,
-            "warnings": [],
-        }
-        with patch.dict(os.environ, {"DRIVE_API_KEY": "test-key"}), patch.object(
-            app, "get_folder_view", return_value=view
-        ):
+        previous_testing = app.app.testing
+        app.app.testing = True
+        self.addCleanup(setattr, app.app, "testing", previous_testing)
+        with patch.object(app, "get_folder_view") as list_all:
             response = self.client.get("/dashboard?page=clips")
 
         self.assertEqual(response.status_code, 200)
-        self.assertIn(b"Corte da biblioteca.mp4", response.data)
-        self.assertIn(b"Baixar v\xc3\xaddeo", response.data)
+        self.assertIn(b'id="clips-search"', response.data)
+        self.assertIn(b'id="clips-folder"', response.data)
+        self.assertIn(b"Todas as pastas", response.data)
+        self.assertIn(b"Carregar mais", response.data)
+        self.assertIn(b"VER PR\xc3\x89VIA", response.data)
+        self.assertNotIn(b'class="folder-card"', response.data)
         self.assertNotIn(b'id="automatic-queue"', response.data)
         self.assertNotIn(b"Analisando v\xc3\xaddeos...", response.data)
+        list_all.assert_not_called()
+
+    def test_clips_library_api_paginates_searches_and_filters_by_folder(self):
+        memes = [
+            {
+                "id": f"meme-{index}",
+                "name": f"MEMES corte {index:03}.mp4",
+                "folderId": "memes-folder",
+                "folderName": "MEMES",
+                "thumbnailLink": f"https://drive.example/thumb/{index}",
+                "videoMediaMetadata": {"durationMillis": "60000", "width": 1280, "height": 720},
+            }
+            for index in range(200)
+        ]
+        other = [
+            {
+                "id": f"other-{index}",
+                "name": f"VIDEOS 2 corte {index:03}.mp4",
+                "folderId": "videos-folder",
+                "folderName": "VIDEOS 2",
+                "thumbnailLink": "",
+                "videoMediaMetadata": {"durationMillis": "90500", "width": 720, "height": 1280},
+            }
+            for index in range(30)
+        ]
+        view = {
+            "folder_name": "Principal",
+            "all_videos": memes + other,
+            "all_folders": [
+                {"id": "memes-folder", "name": "MEMES", "video_count": 200},
+                {"id": "videos-folder", "name": "VIDEOS 2", "video_count": 30},
+            ],
+            "folders": [],
+            "videos": [],
+            "video_count": 230,
+            "warnings": [],
+        }
+        previous_testing = app.app.testing
+        app.app.testing = True
+        self.addCleanup(setattr, app.app, "testing", previous_testing)
+        with patch.object(app, "CLIPS_LIBRARY_CACHE", {}), patch.dict(
+            os.environ, {"DRIVE_API_KEY": "test-key"}
+        ), patch.object(app, "get_folder_view", return_value=view) as list_all:
+            first = self.client.get("/api/clips-library")
+            second = self.client.get("/api/clips-library?offset=30")
+            memes_first = self.client.get("/api/clips-library?folder=memes-folder")
+            memes_second = self.client.get("/api/clips-library?folder=memes-folder&offset=30")
+            memes_search = self.client.get(
+                "/api/clips-library?folder=memes-folder&q=MEMES%20corte%20199"
+            )
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(len(first.get_json()["videos"]), 30)
+        self.assertEqual(first.get_json()["next_offset"], 30)
+        self.assertEqual(first.get_json()["total"], 230)
+        first_video = first.get_json()["videos"][0]
+        self.assertEqual(first_video["folder_name"], "MEMES")
+        self.assertEqual(first_video["duration"], "1:00")
+        self.assertTrue(first_video["thumbnail"].endswith("/0"))
+        self.assertEqual(second.get_json()["videos"][0]["id"], "meme-30")
+        self.assertEqual(memes_first.get_json()["total"], 200)
+        self.assertEqual(len(memes_first.get_json()["videos"]), 30)
+        self.assertEqual(memes_second.get_json()["videos"][0]["id"], "meme-30")
+        self.assertEqual(memes_second.get_json()["total"], 200)
+        self.assertEqual(memes_search.get_json()["total"], 1)
+        self.assertEqual(memes_search.get_json()["videos"][0]["id"], "meme-199")
+        self.assertIn("/stream/meme-0?", first.get_json()["videos"][0]["preview_url"])
+        self.assertEqual(list_all.call_count, 1)
 
     def test_automatic_progress_returns_four_previews_at_one_hundred_percent(self):
         with tempfile.TemporaryDirectory() as temp_dir:
