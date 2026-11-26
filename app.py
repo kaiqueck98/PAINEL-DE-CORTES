@@ -34,6 +34,7 @@ from sqlalchemy import Column, DateTime, Integer, String, Text, create_engine
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import declarative_base, sessionmaker
 from werkzeug.middleware.proxy_fix import ProxyFix
+from werkzeug.security import check_password_hash, generate_password_hash
 from werkzeug.utils import secure_filename
 
 import social_publishing
@@ -130,6 +131,13 @@ class AutomationSetting(TokenBase):
 
     id = Column(Integer, primary_key=True)
     drive_folder_link = Column(Text, nullable=False, default="")
+
+
+class LoginCredential(TokenBase):
+    __tablename__ = "login_credentials"
+
+    id = Column(Integer, primary_key=True)
+    password_hash = Column(Text, nullable=False)
 
 
 TOKEN_ENGINE = create_token_engine()
@@ -270,6 +278,10 @@ class NotificationSettingsError(Exception):
 
 
 class AutomationSettingsError(Exception):
+    pass
+
+
+class LoginConfigurationError(Exception):
     pass
 
 
@@ -705,6 +717,70 @@ def get_csrf_token():
     return token
 
 
+def configured_login_username():
+    return os.environ.get("LOGIN_USER", "").strip() or "admin"
+
+
+def configured_login_password():
+    return os.environ.get("LOGIN_PASS") or "diverso123"
+
+
+def load_login_password_hash():
+    session_db = TokenSessionLocal()
+    try:
+        credential = session_db.get(LoginCredential, 1)
+        return credential.password_hash if credential else ""
+    except SQLAlchemyError as exc:
+        raise LoginConfigurationError(
+            "Não foi possível consultar a configuração de login."
+        ) from exc
+    finally:
+        session_db.close()
+
+
+def save_login_password_hash(password_hash):
+    require_persistent_configuration_database()
+    session_db = TokenSessionLocal()
+    try:
+        credential = session_db.get(LoginCredential, 1)
+        if credential:
+            credential.password_hash = password_hash
+        else:
+            session_db.add(LoginCredential(id=1, password_hash=password_hash))
+        session_db.commit()
+    except SQLAlchemyError as exc:
+        session_db.rollback()
+        raise LoginConfigurationError(
+            "Não foi possível salvar a nova senha."
+        ) from exc
+    finally:
+        session_db.close()
+
+
+def login_password_matches(password):
+    password_hash = load_login_password_hash()
+    if password_hash:
+        try:
+            return check_password_hash(password_hash, password)
+        except (TypeError, ValueError) as exc:
+            raise LoginConfigurationError(
+                "A senha salva está inválida. Corrija a configuração de login."
+            ) from exc
+    return secrets.compare_digest(
+        password.encode("utf-8"),
+        configured_login_password().encode("utf-8"),
+    )
+
+
+def login_credentials_match(username, password):
+    username_matches = secrets.compare_digest(
+        username.encode("utf-8"),
+        configured_login_username().encode("utf-8"),
+    )
+    password_matches = login_password_matches(password)
+    return username_matches and password_matches
+
+
 def _has_usable_token(token_data):
     if not isinstance(token_data, dict):
         return False
@@ -718,6 +794,14 @@ def _has_usable_token(token_data):
 
 @app.context_processor
 def social_template_context():
+    if request.endpoint == "login":
+        return {
+            "csrf_token": get_csrf_token(),
+            "tiktok_connected": False,
+            "youtube_connected": False,
+            "social_token_error": None,
+        }
+
     token_error = None
     try:
         tokens = social_publishing.load_social_tokens()
@@ -748,6 +832,78 @@ def social_template_context():
         "youtube_connected": youtube_connected,
         "social_token_error": token_error,
     }
+
+
+@app.before_request
+def require_authenticated_user():
+    if request.endpoint in {
+        "login",
+        "static",
+        "tiktok_developers_site_verification",
+    }:
+        return None
+    if session.get("authenticated") is True:
+        return None
+    return redirect(url_for("login"))
+
+
+@app.route("/", methods=["GET", "POST"], endpoint="login")
+def login():
+    if session.get("authenticated") is True:
+        return redirect(url_for("dashboard"))
+
+    error = None
+    if request.method == "POST":
+        csrf_token = session.get("csrf_token", "")
+        supplied_token = request.form.get("csrf_token", "")
+        if not csrf_token or not supplied_token or not secrets.compare_digest(
+            csrf_token, supplied_token
+        ):
+            return Response(
+                "A sessão expirou. Atualize a página e tente novamente.",
+                status=400,
+                mimetype="text/plain",
+            )
+        try:
+            credentials_valid = login_credentials_match(
+                request.form.get("username", ""),
+                request.form.get("password", ""),
+            )
+        except LoginConfigurationError as exc:
+            app.logger.error("Falha ao validar login: %s", exc)
+            return render_template(
+                "login.html",
+                csrf_token=get_csrf_token(),
+                error="Não foi possível validar o login. Tente novamente.",
+            ), 503
+        if credentials_valid:
+            session.clear()
+            session["authenticated"] = True
+            get_csrf_token()
+            return redirect(url_for("dashboard"))
+        error = "Usuário ou senha inválidos."
+
+    return render_template(
+        "login.html",
+        csrf_token=get_csrf_token(),
+        error=error,
+    )
+
+
+@app.route("/logout", methods=["POST"])
+def logout():
+    csrf_token = session.get("csrf_token", "")
+    supplied_token = request.form.get("csrf_token", "")
+    if not csrf_token or not supplied_token or not secrets.compare_digest(
+        csrf_token, supplied_token
+    ):
+        return Response(
+            "A sessão expirou. Atualize a página e tente novamente.",
+            status=400,
+            mimetype="text/plain",
+        )
+    session.clear()
+    return redirect(url_for("login"))
 
 
 def _oauth_redirect_uri_override(platform):
@@ -930,9 +1086,8 @@ def terms():
     )
 
 
-@app.route("/configuracao", methods=["GET"], endpoint="configuration")
+@app.route("/configuracao", methods=["GET", "POST"], endpoint="configuration")
 @app.route("/dashboard", methods=["GET", "POST"], endpoint="dashboard")
-@app.route("/", methods=["GET", "POST"], endpoint="index")
 def index():
     view = None
     error = None
@@ -943,6 +1098,8 @@ def index():
     notification_values = {}
     telegram_configured = False
     config_warnings = []
+    drive_link_saved = False
+    drive_settings_error = ""
     submitted_folder_link = False
     path_ids = []
     sort_order = ""
@@ -950,7 +1107,7 @@ def index():
     posted_filter = "all"
     folder_model = {}
 
-    if configuration_view:
+    if configuration_view and request.method == "GET":
         settings, notification_error = notification_settings_with_status()
         notification_values = {
             key: value
@@ -963,13 +1120,61 @@ def index():
         config_warnings = notification_configuration_warnings(
             settings, notification_error
         )
+        try:
+            drive_link_saved = bool(load_drive_folder_link())
+        except AutomationSettingsError as exc:
+            drive_settings_error = str(exc)
 
-    if (
-        request.method == "GET"
-        and request.endpoint == "index"
-        and request.args.get("path")
-    ):
-        return redirect(url_for("dashboard", **request.args.to_dict()))
+    if configuration_view and request.method == "POST":
+        csrf_token = session.get("csrf_token", "")
+        supplied_token = request.form.get("csrf_token", "")
+        if not csrf_token or not supplied_token or not secrets.compare_digest(
+            csrf_token, supplied_token
+        ):
+            return Response(
+                "A sessão expirou. Atualize a página e tente novamente.",
+                status=400,
+                mimetype="text/plain",
+            )
+        action = request.form.get("action", "")
+        try:
+            if action == "save_drive_folder":
+                folder_link = request.form.get("folder_link", "").strip()
+                folder_id = extract_folder_id(folder_link)
+                api_key = os.environ.get("DRIVE_API_KEY", "").strip()
+                if not api_key:
+                    raise DriveError(
+                        "Configure a variável DRIVE_API_KEY para consultar o Google Drive."
+                    )
+                get_folder_view(folder_id, api_key)
+                save_drive_folder_link(folder_link)
+                flash("Pasta principal salva ✅", "success")
+            elif action == "delete_drive_folder":
+                save_drive_folder_link("")
+                flash("Pasta principal apagada.", "success")
+            elif action == "change_password":
+                current_password = request.form.get("current_password", "")
+                new_password = request.form.get("new_password", "")
+                confirm_password = request.form.get("confirm_password", "")
+                if not login_password_matches(current_password):
+                    raise ValueError("A senha atual está incorreta.")
+                if len(new_password) < 8:
+                    raise ValueError("A nova senha precisa ter pelo menos 8 caracteres.")
+                if new_password != confirm_password:
+                    raise ValueError("A confirmação da nova senha não confere.")
+                save_login_password_hash(generate_password_hash(new_password))
+                flash("Senha atualizada ✅", "success")
+            else:
+                raise ValueError("Ação de configuração inválida.")
+        except (
+            ValueError,
+            DriveError,
+            AutomationSettingsError,
+            LoginConfigurationError,
+        ) as exc:
+            flash(f"Erro ao salvar: {exc}", "error")
+        return redirect(url_for("configuration"))
+
     if request.method == "POST" and request.form.get("action") in {
         "mark_good",
         "save_model",
@@ -1037,8 +1242,6 @@ def index():
                     if request.args.get("path")
                     else [extract_folder_id(folder_link)]
                 )
-            elif request.endpoint == "dashboard":
-                return redirect(url_for("index"))
         except AutomationSettingsError as exc:
             error = str(exc)
         except ValueError as exc:
@@ -1135,6 +1338,8 @@ def index():
         notification_error=notification_error,
         telegram_configured=telegram_configured,
         config_warnings=config_warnings,
+        drive_link_saved=drive_link_saved,
+        drive_settings_error=drive_settings_error,
     )
 
 
@@ -2747,6 +2952,9 @@ main{max-width:1040px;margin:auto;padding:32px 18px}a{color:#b9adff}.card{paddin
 .automatic-sidebar{position:fixed;z-index:20;top:24px;left:16px;display:grid;gap:8px;width:160px;padding:10px;border:1px solid #303b53;border-radius:14px;background:#151d2c}
 .automatic-sidebar a{display:block;padding:10px 12px;border:1px solid transparent;border-radius:10px;color:#d4d4d8;font-size:.9rem;font-weight:650;text-decoration:none}
 .automatic-sidebar a:hover,.automatic-sidebar a[aria-current="page"]{border-color:#514276;background:#29213b;color:#ddd6fe}
+.automatic-sidebar form{margin:0;padding:0;border:0;background:none}
+.automatic-sidebar .sidebar-logout{width:100%;padding:10px 12px;border:1px solid transparent;border-radius:10px;background:transparent;color:#d4d4d8;font-size:.9rem;font-weight:650;text-align:left;cursor:pointer}
+.automatic-sidebar .sidebar-logout:hover{border-color:#514276;background:#29213b}
 h1{font-size:32px}p{line-height:1.5;overflow-wrap:anywhere}.muted{color:#a9b5cb}.notice{border-left:4px solid #e7b653;padding:12px;background:#292419}
 input,select,button{font:inherit;padding:14px;border-radius:10px;border:1px solid #485572;background:#0e1420;color:#fff;max-width:100%}
 input[type=url]{width:100%;margin:10px 0 18px}button{background:#7051ec;cursor:pointer;font-weight:700}button:disabled{opacity:.5;cursor:wait}
@@ -2767,6 +2975,8 @@ label{display:block;font-weight:600}.hero button{width:100%;font-size:18px}img{w
 <a href="{{ url_for('dashboard') }}">Dashboard</a>
 <a href="{{ url_for('agendamento_page') }}" aria-current="page">Automático</a>
 <a href="{{ url_for('configuration') }}">Configuração</a>
+<form method="post" action="{{ url_for('logout') }}"><input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+<button type="submit" class="sidebar-logout">Sair</button></form>
 </nav><main><h1>Automático</h1>
 <p class="muted">Até 4 vídeos distintos. Conteúdo → nota → melhoria → título → capa → postagem.</p>
 {% if erro %}<p class="notice" role="alert">{{ erro }}</p>{% endif %}
@@ -2777,8 +2987,6 @@ label{display:block;font-weight:600}.hero button{width:100%;font-size:18px}img{w
 {% for warning in warnings %}<p class="notice">{{ warning }}</p>{% endfor %}
 <form method="post" class="card hero" id="automatic-form">
 <input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input type="hidden" name="action" value="automatico">
-<label for="folder">Pasta principal do Google Drive</label>
-<input id="folder" name="folder_link" type="url" required autocomplete="off" placeholder="Cole o link aqui...">
 <button type="submit">RODAR AUTOMÁTICO</button>
 <p>08:00 · 12:30 · 18:00 · 21:00 — horário de São Paulo</p>
 <small>Prepara uma prévia. Só agenda depois de aprovar os quatro vídeos e confirmar. YouTube publica; TikTok envia rascunho.
@@ -3614,9 +3822,12 @@ def agendamento_page():
             action = request.form.get("action", "")
             try:
                 if action in {"criar", "automatico"}:
-                    folder_link = request.form.get("folder_link", "").strip()
+                    folder_link = load_drive_folder_link()
+                    if not folder_link:
+                        raise ValueError(
+                            "Salve a pasta principal do Google Drive em Configuração."
+                        )
                     folder_id = extract_folder_id(folder_link)
-                    save_drive_folder_link(folder_link)
                     api_key = os.environ.get("DRIVE_API_KEY", "").strip()
                     folder_name = get_folder_name(folder_id, api_key)
                     times_raw = request.form.get("times", "08:00, 12:30, 18:00, 21:00")

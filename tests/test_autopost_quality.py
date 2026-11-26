@@ -259,7 +259,251 @@ class PipelineTests(unittest.TestCase):
 
 
 class ScreenTests(StoreTests):
-    def test_home_opens_dashboard_after_folder_load_and_keeps_saved_link_private(self):
+    def test_login_is_the_only_public_page_and_protects_dashboard_routes(self):
+        from flask import Flask, Response, redirect, render_template, request, session, url_for
+
+        tree = ast.parse((ROOT / "app.py").read_text(encoding="utf-8-sig"))
+        names = {
+            "configured_login_username",
+            "configured_login_password",
+            "login_credentials_match",
+            "require_authenticated_user",
+            "login",
+            "logout",
+        }
+        nodes = [
+            node for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name in names
+        ]
+        web = Flask("isolated_login_test", template_folder=str(ROOT / "templates"))
+        web.secret_key = "isolated-test-only"
+        web.testing = True
+
+        def csrf_token():
+            token = session.get("csrf_token")
+            if not token:
+                token = "test-token"
+                session["csrf_token"] = token
+            return token
+
+        class LoginConfigurationError(Exception):
+            pass
+
+        namespace = {
+            "app": web,
+            "Response": Response,
+            "redirect": redirect,
+            "render_template": render_template,
+            "request": request,
+            "session": session,
+            "url_for": url_for,
+            "os": os,
+            "secrets": secrets,
+            "get_csrf_token": csrf_token,
+            "LoginConfigurationError": LoginConfigurationError,
+            "login_password_matches": lambda password: secrets.compare_digest(
+                password.encode(), namespace["configured_login_password"]().encode()
+            ),
+        }
+        exec(
+            compile(ast.Module(body=nodes, type_ignores=[]), "<login-routes>", "exec"),
+            namespace,
+        )
+        for rule, endpoint in (
+            ("/dashboard", "dashboard"),
+            ("/agendamento", "agendamento_page"),
+            ("/configuracao", "configuration"),
+        ):
+            web.add_url_rule(rule, endpoint=endpoint, view_func=lambda: "protected")
+        client = web.test_client()
+
+        with patch.dict(os.environ, {"LOGIN_USER": "", "LOGIN_PASS": ""}):
+            response = client.get("/")
+            page = response.get_data(as_text=True)
+            self.assertEqual(response.status_code, 200)
+            self.assertIn('name="username"', page)
+            self.assertIn('name="password"', page)
+            self.assertIn(">Entrar</button>", page)
+            self.assertNotIn("Dashboard", page)
+            self.assertNotIn("Automático", page)
+
+            for path in ("/dashboard", "/agendamento", "/configuracao"):
+                response = client.get(path)
+                self.assertEqual(response.status_code, 302)
+                self.assertEqual(response.location, "/")
+
+            response = client.post(
+                "/", data={"csrf_token": "test-token", "username": "admin", "password": "errada"}
+            )
+            self.assertEqual(response.status_code, 200)
+            self.assertIn("Usuário ou senha inválidos.", response.get_data(as_text=True))
+
+            response = client.post(
+                "/", data={"csrf_token": "test-token", "username": "admin", "password": "diverso123"}
+            )
+            self.assertEqual(response.status_code, 302)
+            self.assertEqual(response.location, "/dashboard")
+            self.assertEqual(client.get("/dashboard").get_data(as_text=True), "protected")
+
+            with client.session_transaction() as state:
+                logout_csrf = state["csrf_token"]
+            response = client.post("/logout", data={"csrf_token": logout_csrf})
+            self.assertEqual(response.status_code, 302)
+            self.assertEqual(response.location, "/")
+            self.assertEqual(client.get("/dashboard").location, "/")
+
+            response = client.get("/")
+            self.assertEqual(response.status_code, 200)
+            with client.session_transaction() as state:
+                configured_csrf = state["csrf_token"]
+            with patch.dict(
+                os.environ, {"LOGIN_USER": "operator", "LOGIN_PASS": "senha-segura"}
+            ):
+                response = client.post(
+                    "/",
+                    data={
+                        "csrf_token": configured_csrf,
+                        "username": "operator",
+                        "password": "senha-segura",
+                    },
+                )
+            self.assertEqual(response.status_code, 302)
+            self.assertEqual(response.location, "/dashboard")
+
+    def test_configuration_saves_and_deletes_drive_link_used_by_dashboard(self):
+        from flask import Flask, flash, redirect, render_template, request, session, url_for
+
+        tree = ast.parse((ROOT / "app.py").read_text(encoding="utf-8-sig"))
+        index_node = next(
+            node for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == "index"
+        )
+        web = Flask("isolated_drive_settings_test", template_folder=str(ROOT / "templates"))
+        web.secret_key = "isolated-test-only"
+        web.testing = True
+        web.jinja_env.filters["duration"] = lambda value: ""
+        web.context_processor(lambda: {
+            "csrf_token": "test-token",
+            "tiktok_connected": False,
+            "youtube_connected": False,
+            "social_token_error": None,
+        })
+        folder_link = "https://drive.google.com/drive/folders/private-folder"
+        load_link = Mock(return_value="")
+        save_link = Mock()
+        folder_view = {
+            "folder_name": "Clipes",
+            "video_count": 0,
+            "videos": [],
+            "folders": [{"id": "subfolder", "name": "50 MIL cortes virais", "video_count": 0}],
+            "warnings": [],
+        }
+        get_folder_view = Mock(return_value=folder_view)
+        namespace = {
+            "app": web,
+            "request": request,
+            "session": session,
+            "flash": flash,
+            "redirect": redirect,
+            "url_for": url_for,
+            "render_template": render_template,
+            "load_drive_folder_link": load_link,
+            "save_drive_folder_link": save_link,
+            "extract_folder_id": lambda value: "private-folder",
+            "parse_folder_path": lambda value: value.split(","),
+            "get_folder_view": get_folder_view,
+            "load_good_video_ids": Mock(return_value=set()),
+            "load_posted_video_ids": Mock(return_value=set()),
+            "load_social_posts": Mock(return_value={}),
+            "load_folder_models": Mock(return_value={}),
+            "AUTPOST_STORE": Mock(),
+            "video_quality": Mock(),
+            "video_duration_milliseconds": Mock(),
+            "score_video": Mock(),
+            "apply_folder_model": Mock(),
+            "gerar_titulo": Mock(),
+            "NOTIFICATION_FIELDS": ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"),
+            "notification_settings_with_status": Mock(
+                return_value=({"TELEGRAM_BOT_TOKEN": "", "TELEGRAM_CHAT_ID": ""}, "")
+            ),
+            "notification_configuration_warnings": Mock(return_value=[]),
+            "os": os,
+            "re": re,
+            "secrets": secrets,
+            "DriveError": type("DriveError", (Exception,), {}),
+            "GoodVideosError": type("GoodVideosError", (Exception,), {}),
+            "FolderModelsError": type("FolderModelsError", (Exception,), {}),
+            "PostedVideosError": type("PostedVideosError", (Exception,), {}),
+            "SocialPostsError": type("SocialPostsError", (Exception,), {}),
+            "AutomationSettingsError": type("AutomationSettingsError", (Exception,), {}),
+        }
+        exec(
+            compile(ast.Module(body=[index_node], type_ignores=[]), "<drive-settings-route>", "exec"),
+            namespace,
+        )
+        for rule, endpoint in (
+            ("/logout", "logout"),
+            ("/agendamento", "agendamento_page"),
+            ("/oauth/<platform>", "start_social_oauth"),
+            ("/oauth/<platform>/disconnect", "disconnect_social"),
+            ("/agendamento/notificacoes", "salvar_notificacoes"),
+            ("/agendamento/notificacoes/testar", "testar_telegram"),
+            ("/privacy", "privacy"),
+            ("/terms", "terms"),
+        ):
+            web.add_url_rule(rule, endpoint=endpoint, view_func=lambda **kwargs: "")
+        client = web.test_client()
+        with client.session_transaction() as state:
+            state["csrf_token"] = "test-token"
+
+        response = client.get("/dashboard")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("<h1>Dashboard</h1>", response.get_data(as_text=True))
+        load_link.assert_called_once_with()
+        load_link.reset_mock()
+
+        response = client.get("/configuracao")
+        page = response.get_data(as_text=True)
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("Pasta principal do Google Drive", page)
+        self.assertIn('placeholder="Cole o link aqui..."', page)
+        self.assertNotIn(folder_link, page)
+
+        with patch.dict(os.environ, {"DRIVE_API_KEY": "test-key"}):
+            response = client.post(
+                "/configuracao",
+                data={
+                    "csrf_token": "test-token",
+                    "action": "save_drive_folder",
+                    "folder_link": folder_link,
+                },
+            )
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.location, "/configuracao")
+        save_link.assert_called_once_with(folder_link)
+        get_folder_view.assert_called_once_with("private-folder", "test-key")
+
+        load_link.return_value = folder_link
+        response = client.get("/configuracao")
+        page = response.get_data(as_text=True)
+        self.assertIn("Link salvo no servidor", page)
+        self.assertNotIn(folder_link, page)
+
+        with patch.dict(os.environ, {"DRIVE_API_KEY": "test-key"}):
+            response = client.get("/dashboard")
+        page = response.get_data(as_text=True)
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("50 MIL cortes virais", page)
+        self.assertNotIn(folder_link, page)
+
+        response = client.post(
+            "/configuracao",
+            data={"csrf_token": "test-token", "action": "delete_drive_folder"},
+        )
+        self.assertEqual(response.status_code, 302)
+        save_link.assert_called_with("")
+
+    def _legacy_home_opens_dashboard_after_folder_load_and_keeps_saved_link_private(self):
         from flask import Flask, redirect, render_template, request, url_for
 
         tree = ast.parse((ROOT / "app.py").read_text(encoding="utf-8-sig"))
@@ -518,6 +762,7 @@ class ScreenTests(StoreTests):
         web.add_url_rule("/dashboard", endpoint="dashboard", view_func=lambda: "")
         web.add_url_rule("/agendamento", endpoint="agendamento_page", view_func=lambda: "")
         web.add_url_rule("/configuracao", endpoint="configuration", view_func=lambda: "")
+        web.add_url_rule("/logout", endpoint="logout", view_func=lambda: "", methods=["POST"])
 
         with web.test_request_context():
             page = render_template_string(
@@ -534,6 +779,13 @@ class ScreenTests(StoreTests):
         self.assertIn('href="/dashboard">Dashboard</a>', page)
         self.assertIn('href="/agendamento" aria-current="page">Automático</a>', page)
         self.assertIn('href="/configuracao">Configuração</a>', page)
+        self.assertIn('action="/logout"', page)
+        self.assertNotIn('name="folder_link"', page)
+        self.assertNotIn("Pasta principal do Google Drive", page)
+        legacy_template = (ROOT / "templates" / "agendamento.html").read_text(
+            encoding="utf-8"
+        )
+        self.assertNotIn('name="folder_link"', legacy_template)
         self.assertNotIn("Configurações de avisos", page)
         self.assertNotIn("TESTAR TELEGRAM", page)
         self.assertNotIn("TELEGRAM_BOT_TOKEN", page)
@@ -576,7 +828,7 @@ class ScreenTests(StoreTests):
         response.close()
 
     def test_automatic_button_route_defaults_and_status(self):
-        from flask import Flask, jsonify, render_template, request, session, url_for
+        from flask import Flask, flash, jsonify, redirect, render_template, render_template_string, request, session, url_for
         web = Flask('isolated_test', template_folder=str(ROOT / 'templates'))
         web.secret_key = 'isolated-test-only'
         web.testing = True
@@ -586,29 +838,56 @@ class ScreenTests(StoreTests):
         nodes = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in names]
         script = next(n for n in tree.body if isinstance(n, ast.Assign)
                       and any(isinstance(t, ast.Name) and t.id == 'TITLE_EDITOR_SCRIPT' for t in n.targets))
+        panel_node = next(
+            n for n in tree.body
+            if isinstance(n, ast.Assign)
+            and any(isinstance(t, ast.Name) and t.id == 'AUTOMATIC_PANEL' for t in n.targets)
+        )
         social = Mock()
         social.load_social_tokens.return_value = {'youtube': {'refresh_token': 'mock'}, 'tiktok': {'refresh_token': 'mock'}}
         ns = dict(app=web, request=request, session=session, render_template=render_template,
+                  flash=flash,
+                  redirect=redirect,
+                  render_template_string=render_template_string,
                   jsonify=jsonify, url_for=url_for, os=os, re=re, secrets=secrets, json=json,
                   unicodedata=unicodedata, autopost=autopost, AUTPOST_STORE=self.store,
                   social_publishing=social, AUTPOST_TIMEZONE_NAME='America/Sao_Paulo',
+                  AUTOMATIC_PANEL=ast.literal_eval(panel_node.value),
+                  automatic_warnings=lambda: [],
+                  notification_overview=lambda: {},
                   schedule_now=lambda: datetime.fromisoformat(self.args[-1]),
-                  get_csrf_token=lambda: 'test-token', extract_folder_id=lambda link: 'folder',
+                  get_csrf_token=lambda: 'test-token',
+                  load_drive_folder_link=lambda: 'https://drive.google.com/drive/folders/folder',
+                  extract_folder_id=lambda link: 'folder',
                   get_folder_name=lambda *a: 'Ciência VIDEOS 2', register_autopost_schedule=Mock(),
                   threading=Mock(), prepare_schedule_content=Mock())
+        web.add_url_rule('/logout', endpoint='logout', view_func=lambda: '', methods=['POST'])
+        web.add_url_rule('/dashboard', endpoint='dashboard', view_func=lambda: '')
+        web.add_url_rule('/configuracao', endpoint='configuration', view_func=lambda: '')
+        web.add_url_rule(
+            '/agendamento/capa/<sha256>',
+            endpoint='automatic_cover',
+            view_func=lambda sha256: '',
+        )
         web.add_url_rule('/suggestions', endpoint='sugestoes_titulo_agendamento', view_func=lambda: '')
         exec(compile(ast.Module(body=[script] + nodes, type_ignores=[]), '<routes>', 'exec'), ns)
         client = web.test_client()
         with client.session_transaction() as sess:
             sess['csrf_token'] = 'test-token'
         with patch.object(autopost, 'validar_analise_conteudo'):
-            for _ in range(2):
-                response = client.post('/agendamento', data={'action': 'automatico', 'csrf_token': 'test-token', 'folder_link': 'folder'})
+            for _ in range(1):
+                response = client.post(
+                    '/agendamento',
+                    data={'action': 'automatico', 'csrf_token': 'test-token'},
+                    follow_redirects=True,
+                )
                 self.assertEqual(response.status_code, 200)
                 self.assertIn('RODAR AUTOMÁTICO', response.get_data(as_text=True))
-                self.assertIn('Agendamento ativo!', response.get_data(as_text=True))
+                self.assertNotIn('<input name="folder_link"', response.get_data(as_text=True))
+                self.assertIn('Análise iniciada.', response.get_data(as_text=True))
         schedules = self.store.list_schedules()
         self.assertEqual(len(schedules), 1)
+        self.assertEqual(schedules[0]['folder_id'], 'folder')
         self.assertEqual(schedules[0]['times'], self.args[3])
         self.assertEqual(schedules[0]['destinations'], ['youtube', 'tiktok'])
         self.assertEqual(schedules[0]['title_template'], '')

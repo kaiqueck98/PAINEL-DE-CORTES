@@ -42,8 +42,28 @@ class DriveFolderTests(unittest.TestCase):
 class PanelRouteTests(unittest.TestCase):
     def setUp(self):
         self.client = app.app.test_client()
+        with self.client.session_transaction() as browser_session:
+            browser_session["authenticated"] = True
+        self.drive_link_patch = patch.object(
+            app,
+            "load_drive_folder_link",
+            return_value="https://drive.google.com/drive/folders/test-folder",
+        )
+        self.drive_link_patch.start()
+        self.addCleanup(self.drive_link_patch.stop)
 
-    def test_root_view_shows_folders_without_rendering_all_videos(self):
+    def test_root_shows_only_the_login_form(self):
+        client = app.app.test_client()
+        response = client.get("/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b'name="username"', response.data)
+        self.assertIn(b'name="password"', response.data)
+        self.assertIn(b">Entrar</button>", response.data)
+        self.assertNotIn(b"Dashboard", response.data)
+        self.assertNotIn(b"Link da pasta do Google Drive", response.data)
+
+    def test_dashboard_shows_folders_without_rendering_all_videos(self):
         view = {
             "folder_name": "Principal",
             "folders": [{"id": "child123", "name": "Cortes", "video_count": 2507}],
@@ -53,10 +73,11 @@ class PanelRouteTests(unittest.TestCase):
         }
         with patch.dict(os.environ, {"DRIVE_API_KEY": "test-key"}), patch.object(
             app, "get_folder_view", return_value=view
+        ), patch.object(
+            app, "load_drive_folder_link",
+            return_value="https://drive.google.com/drive/folders/folder123",
         ):
-            response = self.client.post(
-                "/", data={"folder_link": "https://drive.google.com/drive/folders/folder123"}
-            )
+            response = self.client.get("/dashboard")
 
         self.assertEqual(response.status_code, 200)
         self.assertIn(b"Cortes", response.data)
@@ -94,7 +115,7 @@ class PanelRouteTests(unittest.TestCase):
                 "video720": {"tiktok": {"status": "inbox"}},
             },
         ):
-            response = self.client.get("/?path=root123,child123")
+            response = self.client.get("/dashboard?path=root123,child123")
 
         self.assertEqual(response.status_code, 200)
         self.assertIn(b"Voltar para as pastas", response.data)
@@ -150,10 +171,10 @@ class PanelRouteTests(unittest.TestCase):
             app, "get_folder_view", side_effect=lambda *_: deepcopy(view)
         ), patch.object(app, "load_good_video_ids", return_value={"best123"}):
             filtered = self.client.get(
-                "/?path=root123,child123&sort_order=score&good_filter=good"
+                "/dashboard?path=root123,child123&sort_order=score&good_filter=good"
             )
             sorted_all = self.client.get(
-                "/?path=root123,child123&sort_order=score&good_filter=all"
+                "/dashboard?path=root123,child123&sort_order=score&good_filter=all"
             )
 
         self.assertIn(b"Corte final pronto.mp4", filtered.data)
@@ -175,7 +196,7 @@ class PanelRouteTests(unittest.TestCase):
                 os.environ, {"DRIVE_API_KEY": "test-key"}
             ), patch.object(app, "get_folder_view", return_value=view):
                 response = self.client.post(
-                    "/",
+                    "/dashboard",
                     data={
                         "action": "mark_good",
                         "path": "root123,child123",
@@ -211,7 +232,7 @@ class PanelRouteTests(unittest.TestCase):
                 app, "load_good_video_ids", return_value=set()
             ):
                 saved = self.client.post(
-                    "/",
+                    "/dashboard",
                     data={
                         "action": "save_model",
                         "path": "root123,folder123",
@@ -252,7 +273,7 @@ class PanelRouteTests(unittest.TestCase):
                 app, "load_good_video_ids", return_value=set()
             ), patch.object(app, "load_folder_models", return_value={}):
                 marked = self.client.post(
-                    "/",
+                    "/dashboard",
                     data={
                         "action": "mark_posted",
                         "path": "root123,folder123",
@@ -262,10 +283,10 @@ class PanelRouteTests(unittest.TestCase):
                 )
                 all_videos = self.client.get(marked.location)
                 posted_only = self.client.get(
-                    "/?path=root123,folder123&posted_filter=posted"
+                    "/dashboard?path=root123,folder123&posted_filter=posted"
                 )
                 pending_only = self.client.get(
-                    "/?path=root123,folder123&posted_filter=pending"
+                    "/dashboard?path=root123,folder123&posted_filter=pending"
                 )
 
             self.assertEqual(marked.status_code, 302)
@@ -358,15 +379,16 @@ class PanelRouteTests(unittest.TestCase):
         self.assertIn("FFmpeg não encontrado", response.get_json()["error"])
 
     def test_reports_missing_api_key(self):
-        with patch.dict(os.environ, {"DRIVE_API_KEY": ""}):
-            response = self.client.post(
-                "/", data={"folder_link": "https://drive.google.com/drive/folders/folder123"}
-            )
+        with patch.dict(os.environ, {"DRIVE_API_KEY": ""}), patch.object(
+            app, "load_drive_folder_link",
+            return_value="https://drive.google.com/drive/folders/folder123",
+        ):
+            response = self.client.get("/dashboard")
 
         self.assertIn(b"Configure a vari", response.data)
 
     def test_social_connection_buttons_are_shown_at_the_top(self):
-        response = self.client.get("/")
+        response = self.client.get("/configuracao")
 
         self.assertEqual(response.status_code, 200)
         self.assertIn(b"TikTok", response.data)
@@ -399,6 +421,7 @@ class PanelRouteTests(unittest.TestCase):
         privacy_response = self.client.get("/privacy")
         terms_response = self.client.get("/terms")
         home_response = self.client.get("/")
+        dashboard_response = self.client.get("/dashboard")
 
         self.assertEqual(privacy_response.status_code, 200)
         self.assertIn(b"Pol\xc3\xadtica de Privacidade", privacy_response.data)
@@ -406,8 +429,10 @@ class PanelRouteTests(unittest.TestCase):
         self.assertEqual(terms_response.status_code, 200)
         self.assertIn(b"Termos de Uso", terms_response.data)
         self.assertIn(b"direitos", terms_response.data)
-        self.assertIn(b'href="/privacy"', home_response.data)
-        self.assertIn(b'href="/terms"', home_response.data)
+        self.assertEqual(home_response.status_code, 302)
+        self.assertEqual(home_response.location, "/dashboard")
+        self.assertEqual(dashboard_response.status_code, 200)
+        self.assertIn(b"Dashboard", dashboard_response.data)
 
     def test_connected_social_accounts_show_status(self):
         with patch.object(
@@ -418,7 +443,7 @@ class PanelRouteTests(unittest.TestCase):
                 "youtube": {"refresh_token": "youtube-refresh"},
             },
         ):
-            response = self.client.get("/")
+            response = self.client.get("/configuracao")
 
         self.assertIn(b"TikTok conectado \xe2\x9c\x85", response.data)
         self.assertIn(b"YouTube conectado \xe2\x9c\x85", response.data)
@@ -429,7 +454,7 @@ class PanelRouteTests(unittest.TestCase):
             "load_social_tokens",
             return_value={"tiktok": {"refresh_token": "refresh"}},
         ):
-            response = self.client.get("/")
+            response = self.client.get("/configuracao")
 
         page = response.get_data(as_text=True)
         self.assertIn("caixa de entrada do TikTok", page)
@@ -492,7 +517,7 @@ class PanelRouteTests(unittest.TestCase):
         )
 
     def test_tiktok_inbox_upload_requires_csrf_but_not_a_caption(self):
-        self.client.get("/")
+        self.client.get("/dashboard")
         with self.client.session_transaction() as session_data:
             csrf_token = session_data["csrf_token"]
         worker = unittest.mock.Mock()
@@ -528,7 +553,7 @@ class PanelRouteTests(unittest.TestCase):
             app.SOCIAL_POST_JOBS.pop(accepted.get_json()["job_id"], None)
 
     def test_tiktok_inbox_upload_cannot_be_started_twice(self):
-        self.client.get("/")
+        self.client.get("/dashboard")
         with self.client.session_transaction() as session_data:
             csrf_token = session_data["csrf_token"]
         worker = unittest.mock.Mock()

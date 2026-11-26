@@ -19,6 +19,8 @@ class NotificationSettingsTests(unittest.TestCase):
             bind=self.engine, autoflush=False, expire_on_commit=False
         )
         self.client = app.app.test_client()
+        with self.client.session_transaction() as browser_session:
+            browser_session["authenticated"] = True
         self.patches = [
             patch.object(app, "TOKEN_ENGINE", self.engine),
             patch.object(app, "TokenSessionLocal", self.session_factory),
@@ -97,7 +99,7 @@ class NotificationSettingsTests(unittest.TestCase):
             os.environ,
             {"TELEGRAM_BOT_TOKEN": token, "TELEGRAM_CHAT_ID": "12345"},
         ):
-            response = self.client.get("/agendamento")
+            response = self.client.get("/configuracao")
 
         page = response.get_data(as_text=True)
         self.assertIn("Telegram configurado ✅", page)
@@ -122,6 +124,20 @@ class NotificationSettingsTests(unittest.TestCase):
             def wait(self, timeout=None):
                 return 0
 
+        class SampleResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return None
+
+            def raise_for_status(self):
+                return None
+
+            def iter_content(self, chunk_size):
+                self.chunk_size = chunk_size
+                yield b"source sample"
+
         with tempfile.TemporaryDirectory() as temp_dir:
             destination = os.path.join(temp_dir, "sample.mp4")
 
@@ -133,7 +149,8 @@ class NotificationSettingsTests(unittest.TestCase):
 
             progress = []
             with patch.object(app.autopost, "_media_tools", return_value=("ffmpeg", "ffprobe")), \
-                    patch.object(app.subprocess, "Popen", side_effect=start_process):
+                    patch.object(app.subprocess, "Popen", side_effect=start_process), \
+                    patch.object(app.requests, "get", return_value=SampleResponse()) as get:
                 app.download_video_sample_for_analysis(
                     {
                         "id": "drive-video",
@@ -153,6 +170,9 @@ class NotificationSettingsTests(unittest.TestCase):
         )
         self.assertEqual(command[command.index("-threads") + 1], "1")
         self.assertEqual(progress[-1], 1.0)
+        self.assertEqual(
+            get.call_args.kwargs["headers"]["Range"], "bytes=0-5242879"
+        )
 
     def test_automatic_schedule_still_creates_a_preview(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -170,6 +190,11 @@ class NotificationSettingsTests(unittest.TestCase):
                             "tiktok": {"refresh_token": "mock"},
                         },
                     ), \
+                    patch.object(
+                        app,
+                        "load_drive_folder_link",
+                        return_value="https://drive.google.com/drive/folders/folder-123",
+                    ), \
                     patch.object(app, "get_folder_name", return_value="Vídeos de teste"), \
                     patch.object(app.threading, "Thread"), \
                     patch.object(app, "automatic_warnings", return_value=[]):
@@ -179,7 +204,6 @@ class NotificationSettingsTests(unittest.TestCase):
                     data={
                         "action": "automatico",
                         "csrf_token": csrf,
-                        "folder_link": "https://drive.google.com/drive/folders/folder-123",
                     },
                 )
                 self.assertEqual(post_response.status_code, 302)
@@ -195,10 +219,10 @@ class NotificationSettingsTests(unittest.TestCase):
             self.assertEqual(
                 schedules[0]["times"], ["08:00", "12:30", "18:00", "21:00"]
             )
-            self.assertIn(
-                'value="https://drive.google.com/drive/folders/folder-123"', page
+            self.assertNotIn(
+                "https://drive.google.com/drive/folders/folder-123", page
             )
-            self.assertIn("painel-de-cortes:agendamento:folder-link:v1", page)
+            self.assertNotIn('<input name="folder_link"', page)
             self.assertIn("fetch('/agendamento/progresso'", page)
             self.assertIn("setTimeout(refreshContent,5000)", page)
             self.assertIn("Progresso da análise", page)

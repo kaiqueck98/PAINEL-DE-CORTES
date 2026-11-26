@@ -120,12 +120,24 @@
     .dashboard-sidebar { position: fixed; z-index: 20; top: 24px; left: 16px; display: grid; gap: 8px; width: 160px; padding: 10px; border: 1px solid #30313a; border-radius: 14px; background: #191a20; }
     .dashboard-sidebar a { display: block; padding: 10px 12px; border: 1px solid transparent; border-radius: 10px; color: #d4d4d8; font-size: .9rem; font-weight: 650; text-decoration: none; }
     .dashboard-sidebar a:hover, .dashboard-sidebar a[aria-current="page"] { border-color: #514276; background: #29213b; color: #ddd6fe; }
+    .dashboard-sidebar form { margin: 0; padding: 0; border: 0; background: none; }
+    .sidebar-logout { display: block; width: 100%; padding: 10px 12px; border: 1px solid transparent; border-radius: 10px; background: transparent; color: #d4d4d8; font-size: .9rem; font-weight: 650; text-align: left; }
+    .sidebar-logout:hover { border-color: #514276; background: #29213b; }
+    .drive-settings-form { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 10px; margin: 18px 0 0; padding: 0; border: 0; background: none; }
+    .drive-settings-form label { margin: 0; }
+    .drive-settings-form input { display: block; width: 100%; margin-top: 8px; }
+    .drive-settings-actions { display: flex; gap: 8px; }
+    .drive-settings-actions button:disabled { opacity: .55; cursor: default; }
+    .security-settings-form { margin: 18px 0 0; padding: 0; border: 0; background: none; }
+    .security-settings-form input { display: block; width: 100%; margin-top: 8px; }
     @media (max-width: 560px) {
       main { padding: 44px 0; }
       .input-row { flex-direction: column; }
       button { width: 100%; }
       .connection-disconnect-form button { width: auto; }
       form, .content-panel { padding: 18px; }
+      .drive-settings-form { grid-template-columns: 1fr; }
+      .drive-settings-actions button { flex: 1; }
       .model-form { grid-template-columns: 1fr; }
     }
     @media (min-width: 761px) and (max-width: 1271px) {
@@ -144,6 +156,10 @@
       <a href="{{ url_for('dashboard') }}"{% if dashboard_view %} aria-current="page"{% endif %}>Dashboard</a>
       <a href="{{ url_for('agendamento_page') }}">Automático</a>
       <a href="{{ url_for('configuration') }}"{% if configuration_view %} aria-current="page"{% endif %}>Configuração</a>
+      <form method="post" action="{{ url_for('logout') }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button type="submit" class="sidebar-logout">Sair</button>
+      </form>
     </nav>
   {% endif %}
   <main>
@@ -151,6 +167,32 @@
       <h1>Dashboard</h1>
     {% elif configuration_view %}
       <h1>Configuração</h1>
+
+      {% for category, message in get_flashed_messages(with_categories=true) %}
+        <div class="message {% if category == 'success' %}success-message{% endif %}" role="{{ 'alert' if category == 'error' else 'status' }}">{{ message }}</div>
+      {% endfor %}
+
+      <section class="content-panel" aria-labelledby="drive-settings-heading">
+        <div class="section-heading">
+          <h2 id="drive-settings-heading">Pasta principal do Google Drive</h2>
+        </div>
+        {% if drive_settings_error %}
+          <div class="message" role="alert">{{ drive_settings_error }}</div>
+        {% endif %}
+        {% if drive_link_saved %}
+          <p class="hint" role="status">Link salvo no servidor ✅</p>
+        {% endif %}
+        <form class="drive-settings-form" method="post" action="{{ url_for('configuration') }}">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <label for="drive_folder_link">Link da pasta do Google Drive
+            <input id="drive_folder_link" name="folder_link" type="url" placeholder="Cole o link aqui..." autocomplete="off">
+          </label>
+          <div class="drive-settings-actions">
+            <button type="submit" name="action" value="save_drive_folder">Salvar</button>
+            <button type="submit" name="action" value="delete_drive_folder"{% if not drive_link_saved %} disabled{% endif %}>Apagar</button>
+          </div>
+        </form>
+      </section>
 
       <nav class="social-connections" aria-label="Conectar redes sociais">
         <div class="connection-group">
@@ -179,9 +221,6 @@
       {% if social_token_error %}
         <div class="message" role="status">{{ social_token_error }}</div>
       {% endif %}
-      {% for category, message in get_flashed_messages(with_categories=true) %}
-        <div class="message {% if category == 'success' %}success-message{% endif %}" role="status">{{ message }}</div>
-      {% endfor %}
       <section class="social-publishing-options" aria-label="Envio de rascunhos ao TikTok">
         <p>O vídeo será enviado como rascunho para a caixa de entrada do TikTok. Abra a notificação no TikTok para adicionar texto, editar e publicar.</p>
       </section>
@@ -215,17 +254,23 @@
           <p class="message" role="status">{{ warning }}</p>
         {% endfor %}
       </section>
-    {% else %}
-      <h1>Painel de Cortes Prontos</h1>
-      <a href="{{ url_for('agendamento_page') }}" style="display:block;margin-top:20px;padding:16px;border-radius:14px;background:#7c3aed;color:#fff;font-weight:700;text-align:center;text-decoration:none;font-size:1rem">📅 Automático - 4 vídeos por dia - 08:00, 12:30, 18:00, 21:00 - Clique aqui</a>
-
-      <form method="post">
-        <label for="folder_link">Link da pasta do Google Drive</label>
-        <div class="input-row">
-          <input id="folder_link" name="folder_link" type="url" placeholder="Cole o link aqui..." autocomplete="off" required>
-          <button type="submit">Listar pastas</button>
-        </div>
-      </form>
+      <section class="content-panel" aria-labelledby="security-settings-heading">
+        <h2 id="security-settings-heading">Alterar senha</h2>
+        <form class="security-settings-form" method="post" action="{{ url_for('configuration') }}">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <input type="hidden" name="action" value="change_password">
+          <label for="current_password">Senha atual
+            <input id="current_password" name="current_password" type="password" autocomplete="current-password" required>
+          </label>
+          <label for="new_password">Nova senha
+            <input id="new_password" name="new_password" type="password" autocomplete="new-password" required>
+          </label>
+          <label for="confirm_password">Confirmar nova senha
+            <input id="confirm_password" name="confirm_password" type="password" autocomplete="new-password" required>
+          </label>
+          <button type="submit">Alterar senha</button>
+        </form>
+      </section>
     {% endif %}
 
     {% if error %}
