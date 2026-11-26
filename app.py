@@ -78,6 +78,7 @@ AUTPOST_STORE = autopost.AutopostStore(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "agendamentos.sqlite3")
 )
 AUTPOST_STORE.initialize()
+AUTOMATIC_PAGE_LOCK = threading.Lock()
 AUTPOST_SCHEDULER = BackgroundScheduler(timezone=AUTPOST_TIMEZONE)
 AUTPOST_SCHEDULER_LOCK = threading.Lock()
 AUTPOST_SCHEDULER_STARTED = False
@@ -850,6 +851,42 @@ def require_authenticated_user():
     return redirect(url_for("login"))
 
 
+def ensure_automatic_dashboard_schedule(folder_link):
+    if not folder_link:
+        return None
+    folder_id = extract_folder_id(folder_link)
+    times = ["08:00", "12:30", "18:00", "21:00"]
+    with AUTOMATIC_PAGE_LOCK:
+        schedules = AUTPOST_STORE.list_schedules()
+        schedule = next(
+            (
+                item for item in schedules
+                if item["folder_id"] == folder_id
+                and item["times"] == times
+                and item["status"] in {"draft", "active"}
+            ),
+            None,
+        )
+        if schedule:
+            return schedule
+        api_key = os.environ.get("DRIVE_API_KEY", "").strip()
+        if not api_key:
+            raise DriveError("Configure DRIVE_API_KEY para analisar a pasta.")
+        folder_name = get_folder_name(folder_id, api_key)
+        schedule_id = AUTPOST_STORE.create_schedule(
+            folder_id,
+            folder_name,
+            4,
+            times,
+            ["youtube", "tiktok"],
+            AUTPOST_TIMEZONE_NAME,
+            schedule_now().isoformat(timespec="seconds"),
+            reuse=False,
+            draft=True,
+        )
+        return AUTPOST_STORE.get_schedule(schedule_id)
+
+
 @app.route("/", methods=["GET"], endpoint="login")
 def login():
     if session.get("authenticated") is True:
@@ -1119,7 +1156,7 @@ def index():
         and bool(request.args.get("path"))
     )
     panel_page = "settings" if configuration_view else request.args.get("page", "home")
-    if panel_page not in {"home", "clips", "stats"}:
+    if panel_page not in {"home", "clips", "automatic", "stats", "settings"}:
         panel_page = "home"
     notification_error = ""
     notification_values = {}
@@ -1279,7 +1316,7 @@ def index():
             error = str(exc)
         except ValueError as exc:
             error = str(exc)
-    if path_ids:
+    if path_ids and panel_page != "automatic":
         folder_link = folder_link or f"https://drive.google.com/drive/folders/{path_ids[0]}"
         api_key = os.environ.get("DRIVE_API_KEY", "").strip()
         try:
@@ -1361,29 +1398,31 @@ def index():
             view = None
             error = str(exc)
 
-    if dashboard_view and panel_page == "clips" and path_ids:
+    if dashboard_view and panel_page == "automatic":
         try:
-            schedules = AUTPOST_STORE.list_schedules()
-            automatic_schedule = next(
-                (
-                    schedule for schedule in schedules
-                    if schedule["folder_id"] == path_ids[-1]
-                    and schedule["status"] != "cancelled"
-                ),
-                None,
-            )
+            automatic_schedule = ensure_automatic_dashboard_schedule(folder_link)
             if automatic_schedule:
-                progress_url = url_for(
-                    "progresso_automatico",
-                    schedule_id=automatic_schedule["id"],
-                )
-                automatic_script = TITLE_EDITOR_SCRIPT.replace(
-                    "__CONTENT_ENDPOINT__", progress_url
+                today = schedule_now().strftime("%Y-%m-%d")
+                today_reviews = [
+                    review for review in AUTPOST_STORE.reviews(automatic_schedule["id"])
+                    if review["run_date"] == today
+                ]
+                if not today_reviews:
+                    threading.Thread(
+                        target=prepare_schedule_content,
+                        args=(automatic_schedule["id"],),
+                        daemon=True,
+                    ).start()
+                automatic_script = AUTOMATIC_QUEUE_SCRIPT.replace(
+                    "__CONTENT_ENDPOINT__",
+                    url_for("progresso_automatico", schedule_id=automatic_schedule["id"]),
                 ).replace(
                     "__COVER_ENDPOINT__",
                     url_for("automatic_cover", sha256="SHA"),
                 )
         except autopost.AutopostStoreError as exc:
+            error = error or str(exc)
+        except (DriveError, AutomationSettingsError, ValueError) as exc:
             error = error or str(exc)
 
     drive_link_saved = drive_link_saved or bool(folder_link)
@@ -2717,7 +2756,10 @@ def prepare_schedule_content(schedule_id):
     schedule = AUTPOST_STORE.get_schedule(schedule_id)
     if not schedule or schedule['status'] not in {'active', 'draft'}:
         return
-    if AUTPOST_STORE.reviews(schedule_id):
+    if any(
+        review["run_date"] == run_date
+        for review in AUTPOST_STORE.reviews(schedule_id)
+    ):
         return
     try:
         if not AUTPOST_STORE.begin_listing(
@@ -2739,10 +2781,11 @@ def prepare_schedule_content(schedule_id):
         blocked.update(row.get("video_id") for row in autopost.ler_bloqueados())
         used_ids, _ = AUTPOST_STORE.used_content()
         blocked.update(used_ids)
+        all_videos = view.get("all_videos", [])
         candidates = select_analysis_candidates(
-            view.get("all_videos", []),
+            all_videos,
             blocked,
-            max(8, schedule["videos_per_day"] * 2),
+            len(all_videos),
         )
         if not candidates:
             raise RuntimeError(
@@ -3104,6 +3147,235 @@ Mantenha o servidor ligado. A nota é técnica, não uma previsão de alcance.</
 
 
 # Interface permanece no app.py para não alterar os outros templates.
+AUTOMATIC_QUEUE_SCRIPT = r"""
+<script>
+(() => {
+  const root = document.getElementById('automatic-queue');
+  if (!root) return;
+  const endpoint = '__CONTENT_ENDPOINT__';
+  const coverEndpoint = '__COVER_ENDPOINT__';
+  const grid = document.getElementById('automatic-video-grid');
+  const progress = document.getElementById('automatic-progress');
+  const progressPercent = document.getElementById('automatic-progress-percent');
+  const progressLabel = document.getElementById('automatic-progress-label');
+  const progressDetail = document.getElementById('automatic-progress-detail');
+  const skipped = document.getElementById('automatic-skipped');
+  const csrf = () => document.querySelector('[name="csrf_token"]')?.value || '';
+  const times = ['08:00', '12:30', '18:00', '21:00'];
+  const modal = document.createElement('div');
+  modal.className = 'video-preview-modal';
+  modal.hidden = true;
+  modal.tabIndex = -1;
+  modal.setAttribute('role', 'dialog');
+  modal.setAttribute('aria-modal', 'true');
+  modal.setAttribute('aria-labelledby', 'automatic-preview-title');
+  const dialog = document.createElement('section');
+  dialog.className = 'video-preview-dialog';
+  const heading = document.createElement('header');
+  const previewTitle = document.createElement('h2');
+  previewTitle.id = 'automatic-preview-title';
+  const closeX = document.createElement('button');
+  closeX.type = 'button';
+  closeX.className = 'video-preview-close-x';
+  closeX.textContent = 'X';
+  closeX.setAttribute('aria-label', 'Fechar prévia');
+  const player = document.createElement('video');
+  player.className = 'video-preview';
+  player.controls = true;
+  player.preload = 'metadata';
+  player.playsInline = true;
+  const japaneseDescription = document.createElement('p');
+  const closeButton = document.createElement('button');
+  closeButton.type = 'button';
+  closeButton.className = 'video-preview-close-button';
+  closeButton.textContent = 'Fechar';
+  heading.append(previewTitle, closeX);
+  dialog.append(heading, player, japaneseDescription, closeButton);
+  modal.append(dialog);
+  document.body.append(modal);
+  let previewOpener = null;
+  let stopped = false;
+  let refreshTimer = null;
+  function queueRefresh(delay) {
+    clearTimeout(refreshTimer);
+    if (!stopped) refreshTimer = setTimeout(refresh, delay);
+  }
+  function closePreview(event) {
+    event?.preventDefault();
+    if (modal.hidden) return;
+    modal.hidden = true;
+    player.pause();
+    player.removeAttribute('src');
+    player.load();
+    previewOpener?.focus();
+    previewOpener = null;
+    queueRefresh(0);
+  }
+  closeX.onclick = closePreview;
+  closeButton.onclick = closePreview;
+  modal.addEventListener('keydown', event => {
+    if (event.key === 'Escape') event.preventDefault();
+  });
+
+  function statusLabel(video, slotTime, history, day, isAnalyzing) {
+    if (!video) return isAnalyzing ? 'Analisando' : 'Erro';
+    const rows = (history || []).filter(row => row.video_id === video.id
+      && row.run_time === slotTime && (!day || row.run_date === day.run_date));
+    const values = rows.map(row => String(row.status || '').toLowerCase());
+    if (values.some(value => ['posted', 'postado'].includes(value))) return 'Postado';
+    if (values.some(value => ['error', 'failed', 'falhou', 'rejected'].includes(value))) return 'Erro';
+    if (values.some(value => ['processing', 'pending', 'enviando'].includes(value))) return 'Analisando';
+    if (video.status === 'error' || day?.status === 'error') return 'Erro';
+    if (video.preview_available) return 'Pronto';
+    return isAnalyzing ? 'Analisando' : 'Erro';
+  }
+
+  function openPreview(video, review) {
+    previewOpener = document.activeElement;
+    const copy = video.content || {};
+    previewTitle.textContent = copy.title || 'Título indisponível';
+    japaneseDescription.textContent = 'Descrição (japonês): '
+      + (copy.description_japanese || copy.japanese?.description_japanese || 'Indisponível');
+    player.src = coverEndpoint.replace('SHA', video.sha256)
+      + '?video=1&revision=' + encodeURIComponent(review?.revision || '');
+    modal.hidden = false;
+    closeX.focus();
+  }
+
+  async function reviewAction(review, action, video, button) {
+    button.disabled = true;
+    try {
+      const response = await fetch('/agendamento/revisar', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json', 'X-CSRF-Token': csrf()},
+        body: JSON.stringify({schedule_id: review.schedule_id, revision: review.revision,
+          action, video_id: video?.id})
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || 'Não foi possível atualizar a fila.');
+      location.reload();
+    } catch (error) {
+      progressDetail.textContent = error.message;
+      button.disabled = false;
+    }
+  }
+
+  function render(data) {
+    const days = data.content?.days || [];
+    const day = days[0] || null;
+    const review = (data.reviews || []).find(item => day && item.run_date === day.run_date) || null;
+    const videos = (review?.state?.videos || data.content?.videos || []).slice(0, 4);
+    const isAnalyzing = !day || ['listing', 'analyzing'].includes(day.status);
+    const preparedCandidates = (data.content?.candidates || [])
+      .filter(video => video.preview_available
+        && !['error', 'excluded'].includes(String(video.status || '').toLowerCase())).length;
+    const readyCount = Math.min(4, Math.max(
+      videos.filter(video => video.preview_available).length,
+      preparedCandidates,
+    ));
+    const percent = Math.max(0, Math.min(100, Number(day?.progress) || 0));
+    progress.value = percent;
+    progressPercent.textContent = percent + '%';
+    progressLabel.textContent = `Analisando vídeos... ${Math.min(4, readyCount)} de 4`;
+    progressDetail.textContent = review?.status === 'confirmed'
+      ? `Fila confirmada para ${review.target_date}.`
+      : (isAnalyzing ? 'Preparando os vídeos para a fila de hoje...'
+        : day?.status === 'error' ? 'Análise concluída com erro.'
+          : percent === 100 ? 'Análise concluída.' : 'Preparando os vídeos...');
+    const failed = (data.content?.candidates || []).filter(video =>
+      ['error', 'excluded'].includes(String(video.status || '').toLowerCase()));
+    skipped.hidden = failed.length === 0;
+    if (failed.length) {
+      skipped.querySelector('summary').textContent = `${failed.length} ${failed.length === 1 ? 'vídeo pulado' : 'vídeos pulados'} - ver detalhes`;
+      const detail = skipped.querySelector('div');
+      detail.replaceChildren();
+      for (const video of failed) {
+        const item = document.createElement('p');
+        const reason = (video.reasons || []).join(', ') || 'não foi possível preparar este vídeo';
+        item.textContent = `${video.name || 'Vídeo'}: ${reason}`;
+        detail.append(item);
+      }
+    }
+    grid.replaceChildren();
+    document.getElementById('automatic-confirm')?.remove();
+    const allApproved = !!review && review.state.videos.length === 4
+      && review.state.videos.every(video => review.state.approved.includes(video.id));
+    for (let index = 0; index < 4; index++) {
+      const video = videos[index] || null;
+      const card = document.createElement('article');
+      card.className = 'card automatic-video-card';
+      if (video?.thumbnail && video.sha256) {
+        const image = document.createElement('img');
+        image.src = coverEndpoint.replace('SHA', video.sha256)
+          + (review ? '?revision=' + encodeURIComponent(review.revision) : '');
+        image.alt = 'Miniatura: ' + (video.content?.title || video.name || 'vídeo');
+        image.loading = 'lazy';
+        card.append(image);
+      } else {
+        const placeholder = document.createElement('div');
+        placeholder.className = 'queue-placeholder';
+        placeholder.textContent = video?.name || 'Aguardando análise';
+        card.append(placeholder);
+      }
+      const title = document.createElement('h3');
+      title.textContent = video?.content?.title || (isAnalyzing ? 'Analisando vídeo...' : 'Vídeo indisponível');
+      card.append(title);
+      const time = document.createElement('p');
+      time.textContent = 'Horário: ' + times[index];
+      card.append(time);
+      const status = document.createElement('p');
+      status.className = 'queue-status';
+      status.textContent = 'Status: ' + statusLabel(video, times[index], data.history, day, isAnalyzing);
+      card.append(status);
+      const preview = document.createElement('button');
+      preview.type = 'button';
+      preview.textContent = 'VER PRÉVIA';
+      preview.disabled = !video?.preview_available || !video.sha256;
+      preview.onclick = () => openPreview(video, review);
+      card.append(preview);
+      if (review?.status === 'draft' && video && video.preview_available) {
+        const approve = document.createElement('button');
+        approve.type = 'button';
+        approve.textContent = review.state.approved.includes(video.id) ? 'APROVADO' : 'APROVAR';
+        approve.disabled = review.state.approved.includes(video.id);
+        approve.style.marginLeft = '8px';
+        approve.onclick = () => reviewAction(review, 'approve', video, approve);
+        card.append(approve);
+      }
+      grid.append(card);
+    }
+    if (review?.status === 'draft' && allApproved) {
+      const confirm = document.createElement('button');
+      confirm.type = 'button';
+      confirm.id = 'automatic-confirm';
+      confirm.textContent = 'CONFIRMAR E AGENDAR';
+      confirm.style.marginTop = '16px';
+      confirm.onclick = () => reviewAction(review, 'confirm', null, confirm);
+      grid.after(confirm);
+    }
+  }
+
+  async function refresh() {
+    if (stopped) return;
+    if (!modal.hidden) { queueRefresh(5000); return; }
+    try {
+      const response = await fetch(endpoint, {headers: {'X-CSRF-Token': csrf()}, cache: 'no-store'});
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Falha ao consultar a fila.');
+      if (modal.hidden) render(data);
+    } catch (error) {
+      progressDetail.textContent = 'Não foi possível atualizar a fila. Tentando novamente...';
+    } finally {
+      queueRefresh(5000);
+    }
+  }
+  window.addEventListener('pagehide', () => { stopped = true; }, {once: true});
+  refresh();
+})();
+</script>
+"""
+
+
 TITLE_EDITOR_SCRIPT = r"""
 <script>
 (() => {
@@ -3913,11 +4185,15 @@ def progresso_automatico():
             day, selected_videos = AUTPOST_STORE.get_day(
                 schedule_id, schedule_now().strftime("%Y-%m-%d")
             )
+            day_candidates = AUTPOST_STORE.review_candidates(
+                schedule_id, schedule_now().strftime("%Y-%m-%d")
+            )
             content = {
                 "days": [
                     {key: value for key, value in day.items() if key != "lease"}
                 ] if day else [],
                 "videos": selected_videos,
+                "candidates": day_candidates,
             }
             reviews = AUTPOST_STORE.reviews(schedule_id)
             history = [
@@ -3929,6 +4205,12 @@ def progresso_automatico():
             reviews = AUTPOST_STORE.reviews()
             history = AUTPOST_STORE.list_history(40)
         for report in content['videos']:
+            report['preview_available'] = bool(
+                report.get('prepared_path') and os.path.isfile(report['prepared_path'])
+            )
+            for key in ('prepared_path', 'base_prepared_path', 'analysis_frames'):
+                report.pop(key, None)
+        for report in content.get('candidates', []):
             report['preview_available'] = bool(
                 report.get('prepared_path') and os.path.isfile(report['prepared_path'])
             )
@@ -4103,13 +4385,7 @@ def agendamento_page():
             flash(erro, "error")
         elif ok:
             flash(ok, "success")
-        path = request.form.get("path", "").strip()
-        if not path:
-            try:
-                path = extract_folder_id(load_drive_folder_link())
-            except (ValueError, AutomationSettingsError):
-                path = ""
-        return redirect(url_for("dashboard", page="clips", path=path))
+        return redirect(url_for("dashboard", page="automatic"))
     try:
         schedules = AUTPOST_STORE.list_schedules()
     except Exception as exc:

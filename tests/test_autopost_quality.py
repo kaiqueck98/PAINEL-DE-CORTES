@@ -545,7 +545,7 @@ class ScreenTests(StoreTests):
         response = client.get("/configuracao")
         page = response.get_data(as_text=True)
         self.assertIn("Link salvo no servidor", page)
-        self.assertNotIn(folder_link, page)
+        self.assertIn(f'value="{folder_link}"', page)
 
         with patch.dict(os.environ, {"DRIVE_API_KEY": "test-key"}):
             response = client.get("/dashboard")
@@ -1012,7 +1012,9 @@ class ScreenTests(StoreTests):
         client = web.test_client()
         with client.session_transaction() as sess:
             sess['csrf_token'] = 'test-token'
-        with patch.object(autopost, 'validar_analise_conteudo'):
+        with patch.object(autopost, 'validar_analise_conteudo'), patch.dict(
+            os.environ, {'DRIVE_API_KEY': 'test-key'}
+        ):
             for _ in range(1):
                 response = client.post(
                     '/agendamento',
@@ -1021,7 +1023,7 @@ class ScreenTests(StoreTests):
                 self.assertEqual(response.status_code, 302)
                 self.assertEqual(
                     response.location,
-                    '/dashboard?page=clips&path=folder',
+                    '/dashboard?page=automatic',
                 )
         schedules = self.store.list_schedules()
         self.assertEqual(len(schedules), 1)

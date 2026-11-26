@@ -7,6 +7,7 @@ import tempfile
 import time
 import unittest
 from copy import deepcopy
+from pathlib import Path
 from unittest.mock import patch
 
 import app
@@ -51,6 +52,104 @@ class PanelRouteTests(unittest.TestCase):
         )
         self.drive_link_patch.start()
         self.addCleanup(self.drive_link_patch.stop)
+
+    def test_automatic_dashboard_creates_a_server_side_four_video_queue(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = app.autopost.AutopostStore(os.path.join(temp_dir, "queue.sqlite3"))
+            store.initialize()
+            previous_testing = app.app.testing
+            app.app.testing = True
+            self.addCleanup(setattr, app.app, "testing", previous_testing)
+            with patch.object(app, "AUTPOST_STORE", store), patch.object(
+                app, "get_folder_name", return_value="Pasta principal"
+            ), patch.object(app, "prepare_schedule_content") as prepare, patch.dict(
+                os.environ, {"DRIVE_API_KEY": "test-key"}
+            ):
+                response = self.client.get("/dashboard?page=automatic")
+                second_response = self.client.get("/dashboard?page=automatic")
+
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(second_response.status_code, 200)
+            self.assertIn(b'data-page="automatic"', response.data)
+            self.assertIn(b"Analisando v\xc3\xaddeos... 0 de 4", response.data)
+            self.assertIn(b"At\xc3\xa9 4 v\xc3\xaddeos distintos por dia", response.data)
+            self.assertIn(b"VER PR\xc3\x89VIA", response.data)
+            self.assertNotIn(b'name="folder_link"', response.data)
+            self.assertNotIn(b"localStorage", response.data)
+            self.assertIn(b"player.controls = true", response.data)
+            self.assertIn(b"if (!modal.hidden) { queueRefresh(5000); return; }", response.data)
+            schedules = store.list_schedules()
+            self.assertEqual(len(schedules), 1)
+            self.assertEqual(schedules[0]["folder_id"], "test-folder")
+            self.assertEqual(schedules[0]["times"], ["08:00", "12:30", "18:00", "21:00"])
+            self.assertEqual(schedules[0]["videos_per_day"], 4)
+
+    def test_my_cuts_remains_a_drive_library_separate_from_automatic_queue(self):
+        view = {
+            "folder_name": "Minha biblioteca",
+            "folders": [],
+            "videos": [{
+                "id": "video123",
+                "name": "Corte da biblioteca.mp4",
+                "webViewLink": "https://drive.google.com/file/d/video123/view",
+                "videoMediaMetadata": {"durationMillis": "60000", "width": 1280, "height": 720},
+                "resolution": "1280x720",
+            }],
+            "video_count": 1,
+            "warnings": [],
+        }
+        with patch.dict(os.environ, {"DRIVE_API_KEY": "test-key"}), patch.object(
+            app, "get_folder_view", return_value=view
+        ):
+            response = self.client.get("/dashboard?page=clips")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Corte da biblioteca.mp4", response.data)
+        self.assertIn(b"Baixar v\xc3\xaddeo", response.data)
+        self.assertNotIn(b'id="automatic-queue"', response.data)
+        self.assertNotIn(b"Analisando v\xc3\xaddeos...", response.data)
+
+    def test_automatic_progress_returns_four_previews_at_one_hundred_percent(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = app.autopost.AutopostStore(os.path.join(temp_dir, "queue.sqlite3"))
+            store.initialize()
+            schedule_id = store.create_schedule(
+                "test-folder", "Pasta principal", 4,
+                ["08:00", "12:30", "18:00", "21:00"], ["youtube", "tiktok"],
+                "America/Sao_Paulo", "2026-11-26", draft=True,
+            )
+            run_date = app.schedule_now().strftime("%Y-%m-%d")
+            lease = store.begin_day(schedule_id, run_date, total=4)
+            reports = []
+            for index in range(4):
+                media = Path(temp_dir) / f"prepared-{index}.mp4"
+                media.write_bytes(b"prepared video")
+                report = {
+                    "id": f"video-{index}", "name": f"video-{index}.mp4",
+                    "score": 9, "sha256": f"{index + 1:064x}",
+                    "thumbnail": "cover.jpg", "prepared_path": str(media),
+                    "content": {"title": f"Título {index}",
+                                "japanese": {"description_japanese": "日本語の説明"}},
+                    "status": "analyzed", "progress": 100,
+                }
+                store.save_candidate(schedule_id, run_date, lease, report)
+                reports.append(report)
+            store.finish_day(schedule_id, run_date, lease, reports, success_count=4)
+            store.create_review(schedule_id, run_date)
+            with patch.object(app, "AUTPOST_STORE", store):
+                with self.client.session_transaction() as browser_session:
+                    browser_session["csrf_token"] = "queue-test-token"
+                response = self.client.get(
+                    f"/agendamento/progresso?schedule_id={schedule_id}",
+                    headers={"X-CSRF-Token": "queue-test-token"},
+                )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["content"]["days"][0]["progress"], 100)
+        self.assertEqual(len(payload["content"]["videos"]), 4)
+        self.assertTrue(all(video["preview_available"] for video in payload["content"]["videos"]))
+        self.assertEqual(len(payload["reviews"][0]["state"]["videos"]), 4)
 
     def test_root_shows_only_the_login_form(self):
         client = app.app.test_client()

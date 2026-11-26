@@ -135,7 +135,10 @@ class ContentTests(unittest.TestCase):
             directory.mkdir(parents=True, exist_ok=True)
             return directory
 
+        download_attempts = {"bad": 0, "good": 0}
+
         def download_sample(video, destination, progress):
+            download_attempts[video["id"]] += 1
             if video["id"] == "bad":
                 raise autopost.VideoDownloadError("width not divisible by 2")
             Path(destination).write_bytes(b"short sample for video two")
@@ -177,6 +180,7 @@ class ContentTests(unittest.TestCase):
         reports = self.store.content_overview("2026-11-21")["videos"]
         failed_report = next(report for report in reports if report["id"] == "bad")
         self.assertEqual([report["id"] for report in selected], ["good"])
+        self.assertEqual(download_attempts, {"bad": 2, "good": 1})
         self.assertIn("Vídeo 1 pulado - erro de tamanho, tentando vídeo 2", failed_report["message"])
         self.assertIn("1 deram certo, 1 deram erro", day["message"])
         self.assertEqual(day["progress"], 100)

@@ -220,14 +220,15 @@ class NotificationSettingsTests(unittest.TestCase):
                 self.assertEqual(post_response.status_code, 302)
                 self.assertEqual(
                     post_response.headers["Location"],
-                    "/dashboard?page=clips&path=folder-123",
+                    "/dashboard?page=automatic",
                 )
                 response = self.client.get(post_response.headers["Location"])
 
             page = response.get_data(as_text=True)
             schedules = store.list_schedules()
             self.assertEqual(response.status_code, 200)
-            self.assertIn("<h1>Meus cortes</h1>", page)
+            self.assertIn("<h1>Automático</h1>", page)
+            self.assertIn("id=\"automatic-queue\"", page)
             self.assertIn("Análise iniciada", page)
             self.assertEqual(len(schedules), 1)
             self.assertEqual(schedules[0]["status"], "draft")
@@ -238,8 +239,8 @@ class NotificationSettingsTests(unittest.TestCase):
                 "https://drive.google.com/drive/folders/folder-123", page
             )
             self.assertNotIn('<input name="folder_link"', page)
-            self.assertIn("fetch('/agendamento/progresso?schedule_id=", page)
-            self.assertIn("setTimeout(refreshContent,5000)", page)
+            self.assertIn("fetch(endpoint", page)
+            self.assertIn("queueRefresh(5000)", page)
             self.assertIn("Progresso da análise", page)
 
     def test_postgres_saving_requires_a_persistent_encryption_key(self):

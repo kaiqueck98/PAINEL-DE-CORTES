@@ -1171,6 +1171,19 @@ def preparar_melhores_do_dia(
         )
 
 
+def _retry_download_once(destination, operation):
+    for attempt in range(2):
+        try:
+            return operation()
+        except Exception:
+            if attempt:
+                raise
+            try:
+                os.remove(destination)
+            except FileNotFoundError:
+                pass
+
+
 def _preparar_melhores_do_dia(
     store,
     schedule: dict,
@@ -1276,7 +1289,10 @@ def _preparar_melhores_do_dia(
                                 report["progress"], report["message"],
                             )
 
-                        sample_download(video, source, sample_progress)
+                        _retry_download_once(
+                            source,
+                            lambda: sample_download(video, source, sample_progress),
+                        )
                         report["drive_size"] = int(video.get("size", 0) or 0)
                         report["drive_duration"] = int(
                             (video.get("videoMediaMetadata") or {}).get("durationMillis", 0) or 0
@@ -1402,7 +1418,13 @@ def _preparar_melhores_do_dia(
                             )
                         else:
                             prepare_download = download
-                        preparar_midia_selecionada(report, prepare_download)
+                        def prepare_with_retry(video_id, destination):
+                            return _retry_download_once(
+                                destination,
+                                lambda: prepare_download(video_id, destination),
+                            )
+
+                        preparar_midia_selecionada(report, prepare_with_retry)
                         if report.get('improvements'):
                             report['steps'].append(
                                 'Correções automáticas: '

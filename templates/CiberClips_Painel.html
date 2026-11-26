@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="csrf-token" content="{{ csrf_token }}">
-  <title>{% if not authenticated %}CIBERCLIPS{% elif panel_page == 'settings' %}Configurações — CIBERCLIPS{% elif panel_page == 'clips' %}Meus cortes — CIBERCLIPS{% elif panel_page == 'stats' %}Estatísticas — CIBERCLIPS{% else %}Home — CIBERCLIPS{% endif %}</title>
+  <title>{% if not authenticated %}CIBERCLIPS{% elif panel_page == 'settings' %}Configurações — CIBERCLIPS{% elif panel_page == 'clips' %}Meus cortes — CIBERCLIPS{% elif panel_page == 'automatic' %}Automático — CIBERCLIPS{% elif panel_page == 'stats' %}Estatísticas — CIBERCLIPS{% else %}Home — CIBERCLIPS{% endif %}</title>
   <style>
     *{box-sizing:border-box}
     body{margin:0;background:#0b0b12;color:#f5f3ff;font:15px system-ui,sans-serif}
@@ -83,6 +83,15 @@
     .analysis-progress.has-error progress{accent-color:#e5484d}
     .analysis-progress.is-success{border-color:#24945b;background:#14291f;color:#c5f7d8}
     .analysis-progress.is-success progress{accent-color:#22c55e}
+    #automatic-queue .analysis-progress{border-color:#246c43;background:#10271a}
+    #automatic-queue progress{accent-color:#22c55e}
+    .automatic-video-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:15px}
+    .automatic-video-card{margin:0;min-width:0}
+    .automatic-video-card img{display:block;width:100%;aspect-ratio:16/9;object-fit:cover;border-radius:9px;margin:0 0 14px;background:#09080d}
+    .automatic-video-card h3{overflow-wrap:anywhere}
+    .automatic-video-card .queue-placeholder{display:grid;place-items:center;aspect-ratio:16/9;margin-bottom:14px;border-radius:9px;background:#100e17;color:#8f899e}
+    .automatic-video-card .queue-status{font-weight:700;color:#d8d3e5}
+    .automatic-skipped summary{cursor:pointer}
     .video-preview-modal{position:fixed;inset:0;z-index:1000;display:grid;place-items:center;padding:18px;background:rgba(0,0,0,.82)}
     .video-preview-modal[hidden]{display:none}
     .video-preview-dialog{width:min(900px,100%);max-height:calc(100vh - 36px);overflow:auto;padding:22px;border:1px solid #485572;border-radius:16px;background:#15131e}
@@ -158,6 +167,7 @@
         <nav id="nav" aria-label="Navegação principal">
           <a data-page="home" class="{% if panel_page == 'home' %}active{% endif %}" href="{{ url_for('dashboard', page='home') }}">⌂ &nbsp; Home</a>
           <a data-page="clips" class="{% if panel_page == 'clips' %}active{% endif %}" href="{{ url_for('dashboard', page='clips', path=path_string or None) }}">▷ &nbsp; Meus cortes</a>
+          <a data-page="automatic" class="{% if panel_page == 'automatic' %}active{% endif %}" href="{{ url_for('dashboard', page='automatic') }}">▶ &nbsp; Automático</a>
           <a data-page="stats" class="{% if panel_page == 'stats' %}active{% endif %}" href="{{ url_for('dashboard', page='stats', path=path_string or None) }}">▥ &nbsp; Estatísticas</a>
           <a data-page="settings" class="{% if panel_page == 'settings' %}active{% endif %}" href="{{ url_for('configuration') }}">⚙ &nbsp; Configurações</a>
         </nav>
@@ -170,7 +180,7 @@
         <header>
           <div>
             <small>WORKSPACE / CIBERCLIPS</small>
-            <h2>{% if panel_page == 'settings' %}Configurações{% elif panel_page == 'clips' %}Meus cortes{% elif panel_page == 'stats' %}Estatísticas{% else %}Visão geral{% endif %}</h2>
+            <h2>{% if panel_page == 'settings' %}Configurações{% elif panel_page == 'clips' %}Meus cortes{% elif panel_page == 'automatic' %}Automático{% elif panel_page == 'stats' %}Estatísticas{% else %}Visão geral{% endif %}</h2>
           </div>
           <div class="row"><span class="avatar">◈</span></div>
         </header>
@@ -267,39 +277,82 @@
               <button type="submit">Alterar senha</button>
             </form>
           </section>
+        {% elif panel_page == 'automatic' %}
+          <div class="banner">
+            <small>FILA DE POSTAGEM</small>
+            <h1>Automático</h1>
+            <p>Até 4 vídeos distintos por dia</p>
+          </div>
+          {% if error %}<div class="message" role="alert">{{ error }}</div>{% endif %}
+          {% if not drive_link_saved %}
+            <section class="card">
+              <h3>Configure a pasta do Google Drive</h3>
+              <p>Salve o link nas Configurações para preparar a fila de postagem.</p>
+              <a class="connection-link" href="{{ url_for('configuration') }}">Abrir Configurações</a>
+            </section>
+          {% elif not automatic_schedule %}
+            <section class="card" role="status"><p>A fila automática não pôde ser iniciada. Confira a configuração da pasta e tente novamente.</p></section>
+          {% else %}
+            <div id="automatic-queue" data-progress-url="{{ url_for('progresso_automatico', schedule_id=automatic_schedule.id) }}" data-cover-url="{{ url_for('automatic_cover', sha256='SHA') }}" aria-live="polite">
+              <section class="analysis-progress">
+                <strong id="automatic-progress-label">Analisando vídeos... 0 de 4</strong>
+                <progress id="automatic-progress" max="100" value="0" aria-label="Progresso da análise"></progress>
+                <strong id="automatic-progress-percent">0%</strong>
+                <p id="automatic-progress-detail">Preparando a fila de hoje...</p>
+              </section>
+              <div id="automatic-video-grid" class="automatic-video-grid" aria-live="polite"></div>
+              <details id="automatic-skipped" class="card automatic-skipped" hidden>
+                <summary></summary>
+                <div></div>
+              </details>
+            </div>
+          {% endif %}
         {% elif panel_page == 'clips' %}
           <div id="content">
             <div class="banner">
               <small>SEU ESTÚDIO DIGITAL</small>
               <h1>Meus cortes</h1>
-              <p>{{ current_folder_name or 'Pasta selecionada' }} · até quatro vídeos do dia, com prévia e horários de postagem.</p>
+              <p>{{ current_folder_name or 'Biblioteca de vídeos do Google Drive' }} · sua biblioteca de cortes.</p>
             </div>
             {% if error %}<div class="message" role="alert">{{ error }}</div>{% endif %}
             {% if not drive_link_saved %}
               <section class="card">
                 <h3>Configure a pasta do Google Drive</h3>
-                <p>Salve a pasta principal nas Configurações para preparar os vídeos do dia.</p>
+                <p>Salve a pasta principal nas Configurações para carregar a biblioteca.</p>
                 <a class="connection-link" href="{{ url_for('configuration') }}">Abrir Configurações</a>
               </section>
-            {% elif not current_folder_id %}
+            {% elif view %}
               <section class="card">
-                <h3>Escolha uma pasta</h3>
-                <p>Volte para Home e selecione a pasta que deseja analisar.</p>
+                <div class="row"><h3>{{ current_folder_name }}</h3><small>{{ view.video_count }} vídeo(s)</small></div>
+                {% if path_string and not is_root_view %}<a class="connection-link" href="{{ url_for('dashboard', page='home', path=parent_path_string or None) }}">← Voltar para pastas</a>{% endif %}
               </section>
-            {% elif not automatic_schedule %}
-              <section class="card">
-                <h3>Preparar prévia de hoje</h3>
-                <p>O painel vai analisar a pasta e preparar até quatro vídeos distintos para 08:00, 12:30, 18:00 e 21:00.</p>
-                <form method="post" action="{{ url_for('agendamento_page') }}">
-                  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-                  <input type="hidden" name="action" value="automatico">
-                  <input type="hidden" name="folder_id" value="{{ current_folder_id }}">
-                  <input type="hidden" name="path" value="{{ path_string }}">
-                  <button type="submit">Analisar e preparar vídeos</button>
-                </form>
-              </section>
+              {% if view.folders %}
+                <div class="folder-grid">
+                  {% for folder in view.folders %}
+                    <a class="folder-card" href="{{ url_for('dashboard', page='clips', path=path_string ~ ',' ~ folder.id) }}">
+                      <span class="folder-icon" aria-hidden="true">▰</span>
+                      <h3>{{ folder.name }}</h3><small>{{ folder.video_count }} vídeo(s)</small>
+                    </a>
+                  {% endfor %}
+                </div>
+              {% endif %}
+              {% if view.videos %}
+                <div class="clip-grid">
+                  {% for video in view.videos %}
+                    <article class="card clip-card">
+                      {% if video.thumbnailLink %}<img src="{{ video.thumbnailLink }}" alt="Miniatura: {{ video.name }}" loading="lazy">{% else %}<div class="queue-placeholder">▶</div>{% endif %}
+                      <h3>{{ video.name }}</h3>
+                      <p>{{ video.resolution }} · {{ video.videoMediaMetadata|duration }}</p>
+                      <a class="connection-link" href="{{ video.webViewLink or ('https://drive.google.com/file/d/' ~ video.id ~ '/view') }}" target="_blank" rel="noopener noreferrer">Abrir vídeo</a>
+                      <a class="connection-link" href="{{ url_for('download_video', video_id=video.id, filename=video.name) }}">Baixar vídeo</a>
+                    </article>
+                  {% endfor %}
+                </div>
+              {% elif not view.folders %}
+                <section class="card"><p>Nenhum vídeo foi encontrado nesta pasta.</p></section>
+              {% endif %}
             {% else %}
-              <div id="clips-feed" aria-live="polite"></div>
+              <section class="card"><p>Não foi possível carregar os vídeos da pasta.</p></section>
             {% endif %}
           </div>
         {% elif panel_page == 'stats' %}
@@ -365,7 +418,7 @@
         {% endif %}
       </main>
     </div>
-    {% if panel_page == 'clips' and automatic_schedule and automatic_script %}
+    {% if panel_page == 'automatic' and automatic_script %}
       {{ automatic_script|safe }}
     {% endif %}
   {% endif %}
