@@ -85,6 +85,43 @@ class MediaTests(unittest.TestCase):
         self.assertEqual(autopost.melhorar_video(source), source)
         self.assertEqual(hashlib.sha256(Path(source).read_bytes()).digest(), digest)
 
+    def test_improvement_job_preserves_video_dimensions_and_orientation(self):
+        tree = ast.parse((ROOT / 'app.py').read_text(encoding='utf-8-sig'))
+        function = next(
+            node for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == 'run_ffmpeg'
+        )
+        namespace = {'subprocess': subprocess, 'update_improvement_job': Mock()}
+        exec(compile(ast.Module(body=[function], type_ignores=[]), '<run-ffmpeg>', 'exec'), namespace)
+        ffmpeg = shutil.which('ffmpeg')
+
+        for index, (width, height) in enumerate(((1280, 720), (720, 1280), (720, 720), (721, 1281))):
+            with self.subTest(width=width, height=height):
+                source = os.path.join(self.temp.name, f'source-{index}.mp4')
+                output = os.path.join(self.temp.name, f'output-{index}.mp4')
+                pixel_format = 'yuv444p' if width % 2 or height % 2 else 'yuv420p'
+                autopost._media_command([
+                    ffmpeg, '-hide_banner', '-y', '-f', 'lavfi', '-i',
+                    f'testsrc2=size={width}x{height}:rate=24', '-t', '1',
+                    '-c:v', 'libx264', '-pix_fmt', pixel_format, source,
+                ])
+                namespace['run_ffmpeg'](ffmpeg, source, output, 'test-job', 1000)
+                autopost_output = autopost.melhorar_video(
+                    source,
+                    analise={'brightness': 100, 'blur': 10, 'has_audio': False},
+                    output_dir=os.path.join(self.temp.name, f'autopost-{index}'),
+                )
+                for processed in (output, autopost_output):
+                    metadata = json.loads(autopost._media_command([
+                        'ffprobe', '-v', 'error', '-select_streams', 'v:0',
+                        '-show_entries', 'stream=width,height', '-of', 'json', processed,
+                    ]).stdout)
+                    stream = metadata['streams'][0]
+                    self.assertEqual(
+                        (stream['width'], stream['height']),
+                        (width - width % 2, height - height % 2),
+                    )
+
     def test_dark_video_gets_brightness_correction(self):
         source = os.path.join(self.temp.name, 'dark.mp4')
         autopost._media_command([
@@ -858,6 +895,16 @@ class ScreenTests(StoreTests):
         self.assertNotIn("previewPlayer.addEventListener('ended'", script)
         self.assertNotIn("previewModal.onclick", script)
         self.assertNotIn("event.target === previewModal", script)
+        panel_node = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.Assign)
+            and any(
+                isinstance(target, ast.Name) and target.id == "AUTOMATIC_PANEL"
+                for target in node.targets
+            )
+        )
+        self.assertIn("object-fit:contain", ast.literal_eval(panel_node.value))
 
     def test_processed_preview_route_serves_only_the_prepared_report_media(self):
         from flask import Flask, request, send_file, session

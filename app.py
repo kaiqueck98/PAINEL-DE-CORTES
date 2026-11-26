@@ -1411,9 +1411,8 @@ def download_drive_video_for_job(job_id, video_id, api_key, destination):
 
 def run_ffmpeg(ffmpeg_path, input_path, output_path, job_id, duration_ms):
     filters = (
-        "scale=1080:1920:force_original_aspect_ratio=decrease:force_divisible_by=2,"
-        "pad=1080:1920:(ow-iw)/2:(oh-ih)/2:color=black,"
-        "unsharp=5:5:0.8:3:3:0.35,eq=brightness=0.03,setsar=1"
+        "scale=trunc(iw/2)*2:trunc(ih/2)*2,"
+        "unsharp=5:5:0.8:3:3:0.35,eq=brightness=0.03"
     )
     command = [
         ffmpeg_path,
@@ -1460,23 +1459,24 @@ def run_ffmpeg(ffmpeg_path, input_path, output_path, job_id, duration_ms):
     error_lines = []
     duration_seconds = duration_ms / 1000 if duration_ms > 0 else 0
 
-    for line in process.stdout:
-        line = line.strip()
-        if line.startswith("out_time_ms=") and duration_seconds:
-            try:
-                processed_seconds = int(line.partition("=")[2]) / 1_000_000
-            except ValueError:
-                continue
-            ratio = min(processed_seconds / duration_seconds, 0.99)
-            progress = 25 + round(ratio * 74)
-            update_improvement_job(
-                job_id,
-                progress=progress,
-                message=f"Melhorando qualidade: {progress}%",
-            )
-        elif line and "=" not in line:
-            error_lines.append(line)
-            error_lines = error_lines[-5:]
+    with process.stdout:
+        for line in process.stdout:
+            line = line.strip()
+            if line.startswith("out_time_ms=") and duration_seconds:
+                try:
+                    processed_seconds = int(line.partition("=")[2]) / 1_000_000
+                except ValueError:
+                    continue
+                ratio = min(processed_seconds / duration_seconds, 0.99)
+                progress = 25 + round(ratio * 74)
+                update_improvement_job(
+                    job_id,
+                    progress=progress,
+                    message=f"Melhorando qualidade: {progress}%",
+                )
+            elif line and "=" not in line:
+                error_lines.append(line)
+                error_lines = error_lines[-5:]
 
     return_code = process.wait()
     if return_code:
@@ -2967,7 +2967,7 @@ label{display:block;font-weight:600}.hero button{width:100%;font-size:18px}img{w
 .analysis-progress.has-error progress{accent-color:#e5484d}
 .analysis-progress.is-success{border-color:#24945b;background:#14291f;color:#c5f7d8}
 .analysis-progress.is-success progress{accent-color:#22c55e}
-.video-preview{display:block;width:100%;max-width:720px;margin:14px 0;border-radius:12px;background:#000}
+.video-preview{display:block;width:100%;max-width:720px;margin:14px 0;border-radius:12px;background:#000;object-fit:contain}
 .video-preview-modal{position:fixed;inset:0;z-index:1000;display:grid;place-items:center;padding:18px;background:rgba(0,0,0,.82)}
 .video-preview-modal[hidden]{display:none}
 .video-preview-dialog{width:min(900px,100%);max-height:calc(100vh - 36px);overflow:auto;padding:22px;border:1px solid #485572;border-radius:16px;background:#151d2c}
