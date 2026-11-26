@@ -102,6 +102,33 @@ class PanelRouteTests(unittest.TestCase):
         self.assertNotIn(b"Analisando v\xc3\xaddeos...", response.data)
         list_all.assert_not_called()
 
+    def test_panel_scroll_keeps_the_sidebar_visible_and_login_unaffected(self):
+        previous_testing = app.app.testing
+        app.app.testing = True
+        self.addCleanup(setattr, app.app, "testing", previous_testing)
+        response = self.client.get("/dashboard?page=clips")
+        page = response.data.decode("utf-8")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('<body class="panel-body">', page)
+        self.assertIn("body.panel-body{height:100vh;height:100dvh;overflow:hidden}", page)
+        self.assertIn(
+            "aside{position:sticky;top:0;align-self:start;height:100vh;height:100dvh;overflow-y:auto;",
+            page,
+        )
+        self.assertIn(
+            "main{height:100vh;height:100dvh;min-height:0;overflow-y:auto;overscroll-behavior:contain;",
+            page,
+        )
+        self.assertIn(
+            "aside{position:sticky;top:0;z-index:20;height:auto;max-height:none;grid-row:1;",
+            page,
+        )
+
+        login_response = app.app.test_client().get("/")
+        self.assertEqual(login_response.status_code, 200)
+        self.assertNotIn(b'class="panel-body"', login_response.data)
+
     def test_clips_library_api_paginates_searches_and_filters_by_folder(self):
         memes = [
             {
@@ -169,6 +196,65 @@ class PanelRouteTests(unittest.TestCase):
         self.assertIn("/stream/meme-0?", first.get_json()["videos"][0]["preview_url"])
         self.assertEqual(list_all.call_count, 1)
 
+    def test_clips_library_paginates_all_2507_videos_in_batches_of_30(self):
+        memes = [
+            {
+                "id": f"meme-{index}",
+                "name": f"MEMES corte {index:03}.mp4",
+                "folderId": "memes-folder",
+                "folderName": "MEMES",
+                "videoMediaMetadata": {"durationMillis": "60000"},
+            }
+            for index in range(200)
+        ]
+        other = [
+            {
+                "id": f"other-{index}",
+                "name": f"VIDEOS corte {index:04}.mp4",
+                "folderId": "videos-folder",
+                "folderName": "VIDEOS",
+                "videoMediaMetadata": {"durationMillis": "90500"},
+            }
+            for index in range(2307)
+        ]
+        view = {
+            "folder_name": "Principal",
+            "all_videos": memes + other,
+            "all_folders": [
+                {"id": "memes-folder", "name": "MEMES", "video_count": 200},
+                {"id": "videos-folder", "name": "VIDEOS", "video_count": 2307},
+            ],
+            "folders": [],
+            "videos": [],
+            "video_count": 2507,
+            "warnings": [],
+        }
+        previous_testing = app.app.testing
+        app.app.testing = True
+        self.addCleanup(setattr, app.app, "testing", previous_testing)
+        with patch.object(app, "CLIPS_LIBRARY_CACHE", {}), patch.dict(
+            os.environ, {"DRIVE_API_KEY": "test-key"}
+        ), patch.object(app, "get_folder_view", return_value=view):
+            loaded = []
+            offset = 0
+            while offset is not None:
+                response = self.client.get(f"/api/clips-library?offset={offset}")
+                self.assertEqual(response.status_code, 200)
+                payload = response.get_json()
+                self.assertLessEqual(len(payload["videos"]), 30)
+                loaded.extend(video["id"] for video in payload["videos"])
+                offset = payload["next_offset"]
+
+            memes_response = self.client.get(
+                "/api/clips-library?folder=memes-folder"
+            )
+
+        self.assertEqual(len(loaded), 2507)
+        self.assertEqual(len(set(loaded)), 2507)
+        self.assertEqual(memes_response.status_code, 200)
+        self.assertEqual(memes_response.get_json()["total"], 200)
+        self.assertEqual(len(memes_response.get_json()["videos"]), 30)
+
     def test_automatic_progress_returns_four_previews_at_one_hundred_percent(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             store = app.autopost.AutopostStore(os.path.join(temp_dir, "queue.sqlite3"))
@@ -220,6 +306,7 @@ class PanelRouteTests(unittest.TestCase):
         self.assertIn(b'name="password"', response.data)
         self.assertIn(b">Entrar no painel \xe2\x86\x92</button>", response.data)
         self.assertIn(b'action="/login"', response.data)
+        self.assertNotIn(b'class="panel-body"', response.data)
         self.assertIn("O futuro dos cortes começa aqui.".encode(), response.data)
         self.assertNotIn(b"Interface demonstrativa", response.data)
         self.assertNotIn(b"Dashboard", response.data)
