@@ -683,7 +683,7 @@ def parse_folder_path(value):
 def redirect_to_folder(path_ids, sort_order, good_filter, posted_filter):
     return redirect(
         url_for(
-            "index",
+            "dashboard",
             path=",".join(path_ids),
             sort_order=sort_order if sort_order == "score" else "",
             good_filter=good_filter if good_filter in {"all", "good"} else "all",
@@ -930,7 +930,8 @@ def terms():
     )
 
 
-@app.route("/", methods=["GET", "POST"])
+@app.route("/dashboard", methods=["GET", "POST"], endpoint="dashboard")
+@app.route("/", methods=["GET", "POST"], endpoint="index")
 def index():
     view = None
     error = None
@@ -992,7 +993,7 @@ def index():
             path_ids = [folder_id]
         except ValueError as exc:
             error = str(exc)
-    elif request.args.get("path"):
+    elif request.args.get("path") or request.endpoint == "dashboard":
         sort_order = request.args.get("sort_order", "")
         good_filter = request.args.get("good_filter", "all")
         posted_filter = request.args.get("posted_filter", "all")
@@ -1005,7 +1006,13 @@ def index():
         try:
             folder_link = load_drive_folder_link()
             if folder_link:
-                path_ids = parse_folder_path(request.args["path"])
+                path_ids = (
+                    parse_folder_path(request.args["path"])
+                    if request.args.get("path")
+                    else [extract_folder_id(folder_link)]
+                )
+            elif request.endpoint == "dashboard":
+                return redirect(url_for("index"))
         except AutomationSettingsError as exc:
             error = str(exc)
         except ValueError as exc:
@@ -1072,6 +1079,7 @@ def index():
             view["videos"] = videos
             if submitted_folder_link:
                 save_drive_folder_link(folder_link)
+                return redirect(url_for("dashboard"))
             folder_loaded = True
         except (
             DriveError,
@@ -2701,10 +2709,13 @@ def sugestoes_titulo_agendamento():
 
 AUTOMATIC_PANEL = r"""
 <!doctype html><html lang="pt-BR"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1"><title>Rodar automático — Painel de Cortes</title>
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>Automático — Painel de Cortes</title>
 <style>
 *{box-sizing:border-box}body{margin:0;background:#0c1019;color:#e9edf5;font:16px system-ui,sans-serif}
 main{max-width:1040px;margin:auto;padding:32px 18px}a{color:#b9adff}.card{padding:22px;margin:18px 0;border:1px solid #303b53;border-radius:16px;background:#151d2c}
+.automatic-sidebar{position:fixed;z-index:20;top:24px;left:16px;display:grid;gap:8px;width:160px;padding:10px;border:1px solid #303b53;border-radius:14px;background:#151d2c}
+.automatic-sidebar a{display:block;padding:10px 12px;border:1px solid transparent;border-radius:10px;color:#d4d4d8;font-size:.9rem;font-weight:650;text-decoration:none}
+.automatic-sidebar a:hover,.automatic-sidebar a[aria-current="page"]{border-color:#514276;background:#29213b;color:#ddd6fe}
 h1{font-size:32px}p{line-height:1.5;overflow-wrap:anywhere}.muted{color:#a9b5cb}.notice{border-left:4px solid #e7b653;padding:12px;background:#292419}
 input,select,button{font:inherit;padding:14px;border-radius:10px;border:1px solid #485572;background:#0e1420;color:#fff;max-width:100%}
 input[type=url]{width:100%;margin:10px 0 18px}button{background:#7051ec;cursor:pointer;font-weight:700}button:disabled{opacity:.5;cursor:wait}
@@ -2718,8 +2729,13 @@ label{display:block;font-weight:600}.hero button{width:100%;font-size:18px}img{w
 .analysis-progress.is-success{border-color:#24945b;background:#14291f;color:#c5f7d8}
 .analysis-progress.is-success progress{accent-color:#22c55e}
 .video-preview{display:block;width:100%;max-width:720px;margin:14px 0;border-radius:12px;background:#000}
-</style></head><body><main>
-<a href="/">← Painel e contas conectadas</a><h1>Painel de Cortes · Automático</h1>
+@media (min-width:761px) and (max-width:1391px){main{max-width:none;width:min(1040px,calc(100% - 208px));margin-left:192px;margin-right:16px}}
+@media (max-width:760px){.automatic-sidebar{top:8px;left:8px;right:8px;width:auto;grid-template-columns:repeat(2,minmax(0,1fr));padding:8px}.automatic-sidebar a{text-align:center}main{padding-top:104px}}
+</style></head><body>
+<nav class="automatic-sidebar" aria-label="Navegação principal">
+<a href="{{ url_for('dashboard') }}">Dashboard</a>
+<a href="{{ url_for('agendamento_page') }}" aria-current="page">Automático</a>
+</nav><main><h1>Automático</h1>
 <p class="muted">Até 4 vídeos distintos. Conteúdo → nota → melhoria → título → capa → postagem.</p>
 {% if erro %}<p class="notice" role="alert">{{ erro }}</p>{% endif %}
 {% if ok %}<p class="card" role="status">{{ ok }}</p>{% endif %}

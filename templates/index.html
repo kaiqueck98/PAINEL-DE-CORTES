@@ -111,6 +111,9 @@
     .legal-links { display: flex; justify-content: center; flex-wrap: wrap; gap: 18px; padding: 0 16px 28px; font-size: .8rem; }
     .legal-links a { color: #a1a1aa; text-decoration: none; }
     .legal-links a:hover { color: #c4b5fd; }
+    .dashboard-sidebar { position: fixed; z-index: 20; top: 24px; left: 16px; display: grid; gap: 8px; width: 160px; padding: 10px; border: 1px solid #30313a; border-radius: 14px; background: #191a20; }
+    .dashboard-sidebar a { display: block; padding: 10px 12px; border: 1px solid transparent; border-radius: 10px; color: #d4d4d8; font-size: .9rem; font-weight: 650; text-decoration: none; }
+    .dashboard-sidebar a:hover, .dashboard-sidebar a[aria-current="page"] { border-color: #514276; background: #29213b; color: #ddd6fe; }
     @media (max-width: 560px) {
       main { padding: 44px 0; }
       .input-row { flex-direction: column; }
@@ -119,56 +122,69 @@
       form, .content-panel { padding: 18px; }
       .model-form { grid-template-columns: 1fr; }
     }
+    @media (min-width: 761px) and (max-width: 1271px) {
+      body.has-dashboard-sidebar main { width: min(920px, calc(100% - 208px)); margin-left: 192px; margin-right: 16px; }
+    }
+    @media (max-width: 760px) {
+      .dashboard-sidebar { top: 8px; left: 8px; right: 8px; width: auto; grid-template-columns: repeat(2, minmax(0, 1fr)); padding: 8px; }
+      .dashboard-sidebar a { text-align: center; }
+      body.has-dashboard-sidebar main { padding-top: 104px; }
+    }
   </style>
 </head>
-<body>
+<body class="{% if folder_loaded %}has-dashboard-sidebar{% endif %}">
+  {% if folder_loaded %}
+    <nav class="dashboard-sidebar" aria-label="Navegação principal">
+      <a href="{{ url_for('dashboard') }}" aria-current="page">Dashboard</a>
+      <a href="{{ url_for('agendamento_page') }}">Automático</a>
+    </nav>
+  {% endif %}
   <main>
     {% if folder_loaded %}
       <span class="eyebrow">Organize seus vídeos</span>
       <h1>Painel de Cortes Prontos</h1>
       <p class="intro">Cole o link de uma pasta do Google Drive para navegar pelas pastas e encontrar seus vídeos.</p>
 
-      <!-- BOTAO AGENDAMENTO - JA COLOCADO PRA VOCE -->
-      <a href="/agendamento" style="display:block;margin-top:20px;padding:16px;border-radius:14px;background:#7c3aed;color:#fff;font-weight:700;text-align:center;text-decoration:none;font-size:1rem">📅 Postagem Automática - 4 vídeos por dia - 08:00, 12:30, 18:00, 21:00 - Clique aqui</a>
+      <a href="{{ url_for('agendamento_page') }}" style="display:block;margin-top:20px;padding:16px;border-radius:14px;background:#7c3aed;color:#fff;font-weight:700;text-align:center;text-decoration:none;font-size:1rem">📅 Automático - 4 vídeos por dia - 08:00, 12:30, 18:00, 21:00 - Clique aqui</a>
     {% else %}
       <h1>Painel de Cortes Prontos</h1>
     {% endif %}
 
-    <nav class="social-connections" aria-label="Conectar redes sociais">
-      <div class="connection-group">
-        <a class="connection-link {% if tiktok_connected %}connected{% else %}disconnected{% endif %}" href="{{ url_for('start_social_oauth', platform='tiktok') }}">
-          {% if tiktok_connected %}TikTok conectado ✅{% else %}TikTok desconectado · Conectar{% endif %}
-        </a>
-        {% if tiktok_connected %}
-          <form class="connection-disconnect-form" method="post" action="{{ url_for('disconnect_social', platform='tiktok') }}">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            <button class="connection-link disconnected disconnect-button" type="submit" aria-label="Desconectar TikTok">Desconectar</button>
-          </form>
-        {% endif %}
-      </div>
-      <div class="connection-group">
-        <a class="connection-link {% if youtube_connected %}connected{% else %}disconnected{% endif %}" href="{{ url_for('start_social_oauth', platform='youtube') }}">
-          {% if youtube_connected %}YouTube conectado ✅{% else %}YouTube desconectado · Conectar{% endif %}
-        </a>
-        {% if youtube_connected %}
-          <form class="connection-disconnect-form" method="post" action="{{ url_for('disconnect_social', platform='youtube') }}">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            <button class="connection-link disconnected disconnect-button" type="submit" aria-label="Desconectar YouTube">Desconectar</button>
-          </form>
-        {% endif %}
-      </div>
-    </nav>
     {% if folder_loaded %}
+      <nav class="social-connections" aria-label="Conectar redes sociais">
+        <div class="connection-group">
+          <a class="connection-link {% if tiktok_connected %}connected{% else %}disconnected{% endif %}" href="{{ url_for('start_social_oauth', platform='tiktok') }}">
+            {% if tiktok_connected %}TikTok conectado ✅{% else %}TikTok desconectado · Conectar{% endif %}
+          </a>
+          {% if tiktok_connected %}
+            <form class="connection-disconnect-form" method="post" action="{{ url_for('disconnect_social', platform='tiktok') }}">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <button class="connection-link disconnected disconnect-button" type="submit" aria-label="Desconectar TikTok">Desconectar</button>
+            </form>
+          {% endif %}
+        </div>
+        <div class="connection-group">
+          <a class="connection-link {% if youtube_connected %}connected{% else %}disconnected{% endif %}" href="{{ url_for('start_social_oauth', platform='youtube') }}">
+            {% if youtube_connected %}YouTube conectado ✅{% else %}YouTube desconectado · Conectar{% endif %}
+          </a>
+          {% if youtube_connected %}
+            <form class="connection-disconnect-form" method="post" action="{{ url_for('disconnect_social', platform='youtube') }}">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <button class="connection-link disconnected disconnect-button" type="submit" aria-label="Desconectar YouTube">Desconectar</button>
+            </form>
+          {% endif %}
+        </div>
+      </nav>
       {% if social_token_error %}
         <div class="message" role="status">{{ social_token_error }}</div>
       {% endif %}
       {% for category, message in get_flashed_messages(with_categories=true) %}
         <div class="message {% if category == 'success' %}success-message{% endif %}" role="status">{{ message }}</div>
       {% endfor %}
+      <section class="social-publishing-options" aria-label="Envio de rascunhos ao TikTok">
+        <p>O vídeo será enviado como rascunho para a caixa de entrada do TikTok. Abra a notificação no TikTok para adicionar texto, editar e publicar.</p>
+      </section>
     {% endif %}
-    <section class="social-publishing-options" aria-label="Envio de rascunhos ao TikTok">
-      <p>O vídeo será enviado como rascunho para a caixa de entrada do TikTok. Abra a notificação no TikTok para adicionar texto, editar e publicar.</p>
-    </section>
 
     <form method="post">
       <label for="folder_link">Link da pasta do Google Drive</label>
@@ -176,7 +192,9 @@
         <input id="folder_link" name="folder_link" type="url" placeholder="Cole o link aqui..." autocomplete="off" required>
         <button type="submit">Listar pastas</button>
       </div>
-      <p class="hint">A pasta precisa estar acessível pela chave da API configurada no servidor.</p>
+      {% if folder_loaded %}
+        <p class="hint">A pasta precisa estar acessível pela chave da API configurada no servidor.</p>
+      {% endif %}
     </form>
 
     {% if error %}
@@ -191,11 +209,11 @@
         </div>
 
         {% if not is_root_view %}
-          <a class="back-link" href="{{ url_for('index', path=parent_path_string) }}">← Voltar para as pastas</a>
+          <a class="back-link" href="{{ url_for('dashboard', path=parent_path_string) }}">← Voltar para as pastas</a>
           <nav class="posted-filters" aria-label="Filtrar por status de postagem">
-            <a class="control-link {% if posted_filter == 'all' %}active{% endif %}" href="{{ url_for('index', path=path_string, sort_order=sort_order, good_filter=good_filter, posted_filter='all') }}">Todos</a>
-            <a class="control-link {% if posted_filter == 'pending' %}active{% endif %}" href="{{ url_for('index', path=path_string, sort_order=sort_order, good_filter=good_filter, posted_filter='pending') }}">Para postar</a>
-            <a class="control-link {% if posted_filter == 'posted' %}active{% endif %}" href="{{ url_for('index', path=path_string, sort_order=sort_order, good_filter=good_filter, posted_filter='posted') }}">Já postados</a>
+            <a class="control-link {% if posted_filter == 'all' %}active{% endif %}" href="{{ url_for('dashboard', path=path_string, sort_order=sort_order, good_filter=good_filter, posted_filter='all') }}">Todos</a>
+            <a class="control-link {% if posted_filter == 'pending' %}active{% endif %}" href="{{ url_for('dashboard', path=path_string, sort_order=sort_order, good_filter=good_filter, posted_filter='pending') }}">Para postar</a>
+            <a class="control-link {% if posted_filter == 'posted' %}active{% endif %}" href="{{ url_for('dashboard', path=path_string, sort_order=sort_order, good_filter=good_filter, posted_filter='posted') }}">Já postados</a>
           </nav>
           <form class="model-form" method="post">
             <input type="hidden" name="action" value="save_model">
@@ -214,9 +232,9 @@
             <button type="submit">Salvar modelo</button>
           </form>
           <div class="video-controls">
-            <a class="control-link" href="{{ url_for('index', path=path_string, sort_order='score', good_filter=good_filter, posted_filter=posted_filter) }}">Melhores primeiro</a>
+            <a class="control-link" href="{{ url_for('dashboard', path=path_string, sort_order='score', good_filter=good_filter, posted_filter=posted_filter) }}">Melhores primeiro</a>
             {% if sort_order == 'score' %}
-              <a class="control-link" href="{{ url_for('index', path=path_string, good_filter=good_filter, posted_filter=posted_filter) }}">Ordem original</a>
+              <a class="control-link" href="{{ url_for('dashboard', path=path_string, good_filter=good_filter, posted_filter=posted_filter) }}">Ordem original</a>
             {% endif %}
             <form method="get">
               <input type="hidden" name="path" value="{{ path_string }}">
@@ -247,7 +265,7 @@
           <h3 class="subheading">Subpastas</h3>
           <div class="folder-grid">
             {% for folder in view.folders %}
-              <a class="folder-card" href="{{ url_for('index', path=path_string ~ ',' ~ folder.id) }}">
+              <a class="folder-card" href="{{ url_for('dashboard', path=path_string ~ ',' ~ folder.id) }}">
                 <span class="folder-icon" aria-hidden="true">▰</span>
                 <h3 class="folder-title">{{ folder.name }}</h3>
                 <span class="folder-count">{{ folder.video_count }} vídeo(s)</span>

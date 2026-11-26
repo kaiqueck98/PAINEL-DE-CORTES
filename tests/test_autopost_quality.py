@@ -259,8 +259,8 @@ class PipelineTests(unittest.TestCase):
 
 
 class ScreenTests(StoreTests):
-    def test_home_shows_only_connections_and_folder_form_until_drive_loads(self):
-        from flask import Flask, render_template, request
+    def test_home_opens_dashboard_after_folder_load_and_keeps_saved_link_private(self):
+        from flask import Flask, redirect, render_template, request, url_for
 
         tree = ast.parse((ROOT / "app.py").read_text(encoding="utf-8-sig"))
         index_node = next(
@@ -268,7 +268,18 @@ class ScreenTests(StoreTests):
             for node in tree.body
             if isinstance(node, ast.FunctionDef) and node.name == "index"
         )
-        index_node.decorator_list = []
+        web = Flask("isolated_home_test", template_folder=str(ROOT / "templates"))
+        web.secret_key = "isolated-test-only"
+        web.testing = True
+        web.jinja_env.filters["duration"] = lambda value: ""
+        web.context_processor(
+            lambda: {
+                "csrf_token": "test-token",
+                "tiktok_connected": True,
+                "youtube_connected": True,
+                "social_token_error": None,
+            }
+        )
         folder_link = "https://drive.google.com/drive/folders/folder"
         load_link = Mock(return_value="")
         save_link = Mock()
@@ -281,7 +292,10 @@ class ScreenTests(StoreTests):
         }
         get_folder_view = Mock(return_value=folder_view)
         namespace = {
+            "app": web,
             "request": request,
+            "redirect": redirect,
+            "url_for": url_for,
             "render_template": render_template,
             "load_drive_folder_link": load_link,
             "save_drive_folder_link": save_link,
@@ -311,19 +325,6 @@ class ScreenTests(StoreTests):
             compile(ast.Module(body=[index_node], type_ignores=[]), "<home-route>", "exec"),
             namespace,
         )
-        web = Flask("isolated_home_test", template_folder=str(ROOT / "templates"))
-        web.secret_key = "isolated-test-only"
-        web.testing = True
-        web.jinja_env.filters["duration"] = lambda value: ""
-        web.context_processor(
-            lambda: {
-                "csrf_token": "test-token",
-                "tiktok_connected": True,
-                "youtube_connected": True,
-                "social_token_error": None,
-            }
-        )
-        web.add_url_rule("/", endpoint="index", view_func=namespace["index"], methods=["GET", "POST"])
         web.add_url_rule("/agendamento", endpoint="agendamento_page", view_func=lambda: "")
         web.add_url_rule("/oauth/<platform>", endpoint="start_social_oauth", view_func=lambda platform: "")
         web.add_url_rule(
@@ -341,16 +342,18 @@ class ScreenTests(StoreTests):
             self.assertEqual(response.status_code, 200)
             page = response.get_data(as_text=True)
             self.assertIn("<h1>Painel de Cortes Prontos</h1>", page)
-            self.assertIn("TikTok conectado", page)
-            self.assertIn("YouTube conectado", page)
-            self.assertIn("Desconectar", page)
-            self.assertIn("O vídeo será enviado como rascunho", page)
             self.assertIn("Link da pasta do Google Drive", page)
             self.assertIn("Listar pastas", page)
-            self.assertIn("A pasta precisa estar acessível", page)
             self.assertIn('placeholder="Cole o link aqui..."', page)
             self.assertNotIn(folder_link, page)
+            self.assertNotIn("A pasta precisa estar acessível", page)
+            self.assertNotIn("TikTok conectado", page)
+            self.assertNotIn("YouTube conectado", page)
+            self.assertNotIn("Desconectar", page)
+            self.assertNotIn("O vídeo será enviado como rascunho", page)
             self.assertNotIn("Organize seus vídeos", page)
+            self.assertNotIn("Dashboard", page)
+            self.assertNotIn("Automático", page)
             self.assertNotIn("Postagem Automática", page)
             self.assertNotIn("50 MIL cortes virais", page)
             self.assertNotIn('class="content-panel"', page)
@@ -359,34 +362,81 @@ class ScreenTests(StoreTests):
             get_folder_view.side_effect = namespace["DriveError"]("Drive indisponível")
             response = client.post("/", data={"folder_link": folder_link})
             self.assertEqual(response.status_code, 200)
-            self.assertNotIn("Postagem Automática", response.get_data(as_text=True))
+            self.assertNotIn("Dashboard", response.get_data(as_text=True))
             self.assertNotIn(folder_link, response.get_data(as_text=True))
             save_link.assert_not_called()
 
             get_folder_view.side_effect = None
-            response = client.post("/", data={"folder_link": folder_link})
+            load_link.return_value = folder_link
+            response = client.post(
+                "/", data={"folder_link": folder_link}, follow_redirects=True
+            )
             self.assertEqual(response.status_code, 200)
             page = response.get_data(as_text=True)
+            self.assertEqual(response.request.path, "/dashboard")
+            self.assertEqual(response.history[0].location, "/dashboard")
             self.assertIn("50 MIL cortes virais", page)
-            self.assertIn("Postagem Automática", page)
+            self.assertIn("Dashboard", page)
+            self.assertIn("Automático", page)
+            self.assertIn('href="/dashboard"', page)
+            self.assertIn('href="/agendamento"', page)
             self.assertNotIn(folder_link, page)
             save_link.assert_called_once_with(folder_link)
 
-            load_link.return_value = folder_link
+            load_link.reset_mock()
             response = client.get("/")
             self.assertEqual(response.status_code, 200)
             page = response.get_data(as_text=True)
             self.assertNotIn("50 MIL cortes virais", page)
-            self.assertNotIn("Postagem Automática", page)
+            self.assertNotIn("Dashboard", page)
+            self.assertNotIn("Automático", page)
             self.assertNotIn(folder_link, page)
             load_link.assert_not_called()
 
-            response = client.get("/?path=folder")
+            response = client.get("/dashboard")
             self.assertEqual(response.status_code, 200)
             page = response.get_data(as_text=True)
             self.assertIn("50 MIL cortes virais", page)
-            self.assertIn("Postagem Automática", page)
+            self.assertIn("Dashboard", page)
+            self.assertIn("Automático", page)
             self.assertNotIn(folder_link, page)
+
+    def test_automatic_page_has_dashboard_and_automatic_navigation(self):
+        from flask import Flask, render_template_string
+
+        tree = ast.parse((ROOT / "app.py").read_text(encoding="utf-8-sig"))
+        panel_node = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.Assign)
+            and any(
+                isinstance(target, ast.Name) and target.id == "AUTOMATIC_PANEL"
+                for target in node.targets
+            )
+        )
+        panel = ast.literal_eval(panel_node.value)
+        web = Flask("isolated_automatic_navigation_test")
+        web.add_url_rule("/dashboard", endpoint="dashboard", view_func=lambda: "")
+        web.add_url_rule("/agendamento", endpoint="agendamento_page", view_func=lambda: "")
+
+        with web.test_request_context():
+            page = render_template_string(
+                panel,
+                schedules=[],
+                erro=None,
+                ok=None,
+                notification_fields=[],
+                notification_values={},
+                notification_error=None,
+                telegram_configured=False,
+                warnings=[],
+                csrf_token="test-token",
+            )
+
+        self.assertIn("<title>Automático — Painel de Cortes</title>", page)
+        self.assertIn("<h1>Automático</h1>", page)
+        self.assertIn('href="/dashboard">Dashboard</a>', page)
+        self.assertIn('href="/agendamento" aria-current="page">Automático</a>', page)
 
     def test_processed_preview_route_serves_only_the_prepared_report_media(self):
         from flask import Flask, request, send_file, session
