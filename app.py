@@ -939,12 +939,30 @@ def index():
     folder_link = ""
     dashboard_view = request.endpoint == "dashboard"
     configuration_view = request.endpoint == "configuration"
+    notification_error = ""
+    notification_values = {}
+    telegram_configured = False
+    config_warnings = []
     submitted_folder_link = False
     path_ids = []
     sort_order = ""
     good_filter = "all"
     posted_filter = "all"
     folder_model = {}
+
+    if configuration_view:
+        settings, notification_error = notification_settings_with_status()
+        notification_values = {
+            key: value
+            for key, value in settings.items()
+            if not key.endswith("TOKEN")
+        }
+        telegram_configured = bool(
+            settings["TELEGRAM_BOT_TOKEN"] and settings["TELEGRAM_CHAT_ID"]
+        )
+        config_warnings = notification_configuration_warnings(
+            settings, notification_error
+        )
 
     if (
         request.method == "GET"
@@ -1112,6 +1130,11 @@ def index():
         error=error,
         dashboard_view=dashboard_view,
         configuration_view=configuration_view,
+        notification_fields=NOTIFICATION_FIELDS,
+        notification_values=notification_values,
+        notification_error=notification_error,
+        telegram_configured=telegram_configured,
+        config_warnings=config_warnings,
     )
 
 
@@ -2752,8 +2775,6 @@ label{display:block;font-weight:600}.hero button{width:100%;font-size:18px}img{w
 <p class="{{ 'notice' if category == 'error' else 'card' }}" role="{{ 'alert' if category == 'error' else 'status' }}">{{ message }}</p>
 {% endfor %}
 {% for warning in warnings %}<p class="notice">{{ warning }}</p>{% endfor %}
-<p role="status">{{ 'Telegram configurado ✅' if telegram_configured else 'Telegram não configurado' }}</p>
-{% if notification_error %}<p class="notice" role="alert">Erro ao ler configurações: {{ notification_error }}</p>{% endif %}
 <form method="post" class="card hero" id="automatic-form">
 <input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input type="hidden" name="action" value="automatico">
 <label for="folder">Pasta principal do Google Drive</label>
@@ -2762,20 +2783,6 @@ label{display:block;font-weight:600}.hero button{width:100%;font-size:18px}img{w
 <p>08:00 · 12:30 · 18:00 · 21:00 — horário de São Paulo</p>
 <small>Prepara uma prévia. Só agenda depois de aprovar os quatro vídeos e confirmar. YouTube publica; TikTok envia rascunho.
 Mantenha o servidor ligado. A nota é técnica, não uma previsão de alcance.</small>
-</form>
-<details class="card"><summary>Configurações de avisos</summary>
-<form method="post" action="/agendamento/notificacoes">
-<input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-{% for field in notification_fields %}
-<label>{{ field }}<input name="{{ field }}" type="{{ 'password' if field.endswith('TOKEN') else 'text' }}"
-value="{{ '' if field.endswith('TOKEN') else notification_values.get(field,'') }}" autocomplete="off"></label>
-{% endfor %}
-<p>Token vazio mantém o valor salvo. Telegram: inicie uma conversa com seu bot. WhatsApp: use número com país e DDD,
-access token, Phone Number ID e template aprovado com um parâmetro de corpo para a mensagem. Idioma padrão: pt_BR.</p>
-<button type="submit">Salvar avisos</button></form></details>
-<form method="post" action="/agendamento/notificacoes/testar" class="card">
-<input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-<button type="submit">TESTAR TELEGRAM</button>
 </form>
 <details class="card"><summary>Agendamentos existentes e controle</summary>
 {% for s in schedules %}<div class="card"><strong>{{ s.folder_name }}</strong><p>{{ s.status }} · {{ ', '.join(s.times) }}</p>
@@ -3165,6 +3172,37 @@ def notification_settings_with_status():
     return settings, database_error
 
 
+def notification_configuration_warnings(settings, database_error=""):
+    warnings = []
+    if not os.environ.get("OPENROUTER_API_KEY", "").strip():
+        warnings.append(
+            "OPENROUTER_API_KEY ausente: análise local e prévias continuam disponíveis; "
+            "descrições em japonês e triagem visual por IA podem ficar indisponíveis."
+        )
+    if database_error:
+        warnings.append(
+            "Configurações de notificações indisponíveis; as postagens continuam funcionando."
+        )
+    else:
+        if not settings["TELEGRAM_BOT_TOKEN"] or not settings["TELEGRAM_CHAT_ID"]:
+            warnings.append(
+                "Telegram não configurado: avisos de postagem ficarão apenas no painel."
+            )
+        if settings["WHATSAPP_NUMERO"] and not all(
+            settings[key]
+            for key in (
+                "WHATSAPP_ACCESS_TOKEN",
+                "WHATSAPP_PHONE_NUMBER_ID",
+                "WHATSAPP_TEMPLATE",
+            )
+        ):
+            warnings.append(
+                "WhatsApp: número salvo; configure também a API oficial e um "
+                "template aprovado para envio automático."
+            )
+    return warnings
+
+
 def notification_settings():
     settings, database_error = notification_settings_with_status()
     if database_error:
@@ -3273,7 +3311,7 @@ def salvar_notificacoes():
         flash(f"Erro ao salvar: {exc}", "error")
     else:
         flash("Salvo no banco ✅", "success")
-    return redirect(url_for('agendamento_page'))
+    return redirect(url_for('configuration'))
 
 
 @app.route('/agendamento/notificacoes/testar', methods=['POST'])
@@ -3300,7 +3338,7 @@ def testar_telegram():
             )
         else:
             flash("Telegram: mensagem de teste enviada ✅", "success")
-    return redirect(url_for('agendamento_page'))
+    return redirect(url_for('configuration'))
 
 
 def notification_overview():
@@ -3505,19 +3543,6 @@ def progresso_automatico():
 
 def automatic_warnings():
     warnings = []
-    if not os.environ.get('OPENROUTER_API_KEY', '').strip():
-        warnings.append(
-            'OPENROUTER_API_KEY ausente: análise local e prévias continuam disponíveis; '
-            'descrições em japonês e triagem visual por IA podem ficar indisponíveis.'
-        )
-    try:
-        settings = notification_settings()
-        if not settings['TELEGRAM_BOT_TOKEN'] or not settings['TELEGRAM_CHAT_ID']:
-            warnings.append('Telegram não configurado: avisos de postagem ficarão apenas no painel.')
-        if settings['WHATSAPP_NUMERO'] and not all(settings[k] for k in ('WHATSAPP_ACCESS_TOKEN','WHATSAPP_PHONE_NUMBER_ID','WHATSAPP_TEMPLATE')):
-            warnings.append('WhatsApp: número salvo; configure também a API oficial e um template aprovado para envio automático.')
-    except Exception:
-        warnings.append('Configurações de notificações indisponíveis; as postagens continuam funcionando.')
     trends = autopost.carregar_tendencias()
     if trends.get('warning'):
         warnings.append(trends['warning'])
@@ -3652,16 +3677,14 @@ def agendamento_page():
     except Exception as exc:
         schedules = []
         erro = erro or str(exc)
-    settings, notification_error = notification_settings_with_status()
-    notification_values = {k: v for k, v in settings.items() if not k.endswith('TOKEN')}
-    telegram_configured = bool(
-        settings['TELEGRAM_BOT_TOKEN'] and settings['TELEGRAM_CHAT_ID']
+    html = render_template_string(
+        AUTOMATIC_PANEL,
+        schedules=schedules,
+        erro=erro,
+        ok=ok,
+        warnings=automatic_warnings(),
+        csrf_token=get_csrf_token(),
     )
-    html = render_template_string(AUTOMATIC_PANEL, schedules=schedules, erro=erro, ok=ok,
-                                  notification_fields=NOTIFICATION_FIELDS, notification_values=notification_values,
-                                  notification_error=notification_error,
-                                  telegram_configured=telegram_configured,
-                                  warnings=automatic_warnings(), csrf_token=get_csrf_token())
     script = TITLE_EDITOR_SCRIPT.replace("__CONTENT_ENDPOINT__", url_for("progresso_automatico"))
     script = script.replace('__COVER_ENDPOINT__', url_for('automatic_cover', sha256='SHA'))
     # Preserva o título digitado quando outra validação do formulário falhar.

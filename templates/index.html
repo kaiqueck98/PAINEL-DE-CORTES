@@ -31,6 +31,12 @@
     .success-message { background: #1d3b2a; color: #a7f3c1; }
     .social-publishing-options { margin-top: 12px; padding: 14px; border: 1px solid #30313a; border-radius: 12px; background: #191a20; }
     .social-publishing-options p { margin: 4px 0 10px; color: #a1a1aa; font-size: .82rem; }
+    .notification-card { margin: 18px 0; padding: 22px; border: 1px solid #303b53; border-radius: 16px; background: #151d2c; }
+    .notification-card summary { cursor: pointer; }
+    .notification-card form { margin: 0; padding: 0; border: 0; background: none; }
+    .notification-card input:not([type="hidden"]) { display: block; width: 100%; margin: 10px 0 18px; padding: 14px; border: 1px solid #485572; border-radius: 10px; background: #0e1420; color: #fff; font: inherit; }
+    .notification-card button { width: auto; padding: 14px; border-radius: 10px; background: #7051ec; font: inherit; cursor: pointer; }
+    .notification-card button:hover { background: #6d28d9; }
     label { display: block; margin-bottom: 10px; font-size: .9rem; font-weight: 600; }
     .input-row { display: flex; gap: 10px; }
     input { min-width: 0; flex: 1; padding: 14px 16px; border: 1px solid #3c3d48; border-radius: 10px; background: #111217; color: #fff; font: inherit; }
@@ -178,6 +184,36 @@
       {% endfor %}
       <section class="social-publishing-options" aria-label="Envio de rascunhos ao TikTok">
         <p>O vídeo será enviado como rascunho para a caixa de entrada do TikTok. Abra a notificação no TikTok para adicionar texto, editar e publicar.</p>
+      </section>
+
+      <details class="notification-card">
+        <summary>Configurações de avisos</summary>
+        <form method="post" action="{{ url_for('salvar_notificacoes') }}">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          {% for field in notification_fields %}
+            <label>{{ field }}
+              <input name="{{ field }}" type="{{ 'password' if field.endswith('TOKEN') else 'text' }}"
+                value="{{ '' if field.endswith('TOKEN') else notification_values.get(field, '') }}" autocomplete="off">
+            </label>
+          {% endfor %}
+          <p>Token vazio mantém o valor salvo. Telegram: inicie uma conversa com seu bot. WhatsApp: use número com país e DDD,
+            access token, Phone Number ID e template aprovado com um parâmetro de corpo para a mensagem. Idioma padrão: pt_BR.</p>
+          <button type="submit">Salvar avisos</button>
+        </form>
+      </details>
+      <form method="post" action="{{ url_for('testar_telegram') }}" class="notification-card">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button type="submit">TESTAR TELEGRAM</button>
+      </form>
+      <section class="notification-card" aria-labelledby="configuration-status-heading">
+        <h2 id="configuration-status-heading">Outras configurações</h2>
+        <p role="status">{{ 'Telegram configurado ✅' if telegram_configured else 'Telegram não configurado' }}</p>
+        {% if notification_error %}
+          <p class="message" role="alert">Erro ao ler configurações: {{ notification_error }}</p>
+        {% endif %}
+        {% for warning in config_warnings %}
+          <p class="message" role="status">{{ warning }}</p>
+        {% endfor %}
       </section>
     {% else %}
       <h1>Painel de Cortes Prontos</h1>

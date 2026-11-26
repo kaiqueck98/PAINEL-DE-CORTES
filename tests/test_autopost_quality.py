@@ -312,6 +312,30 @@ class ScreenTests(StoreTests):
             "score_video": Mock(),
             "apply_folder_model": Mock(),
             "gerar_titulo": Mock(),
+            "NOTIFICATION_FIELDS": (
+                "TELEGRAM_BOT_TOKEN",
+                "TELEGRAM_CHAT_ID",
+                "WHATSAPP_NUMERO",
+                "WHATSAPP_ACCESS_TOKEN",
+                "WHATSAPP_PHONE_NUMBER_ID",
+                "WHATSAPP_TEMPLATE",
+                "WHATSAPP_TEMPLATE_LANGUAGE",
+            ),
+            "notification_settings_with_status": Mock(
+                return_value=(
+                    {
+                        "TELEGRAM_BOT_TOKEN": "secret-test-token",
+                        "TELEGRAM_CHAT_ID": "test-chat",
+                        "WHATSAPP_NUMERO": "",
+                        "WHATSAPP_ACCESS_TOKEN": "secret-whatsapp-token",
+                        "WHATSAPP_PHONE_NUMBER_ID": "",
+                        "WHATSAPP_TEMPLATE": "",
+                        "WHATSAPP_TEMPLATE_LANGUAGE": "",
+                    },
+                    "",
+                )
+            ),
+            "notification_configuration_warnings": Mock(return_value=[]),
             "os": os,
             "re": re,
             "DriveError": type("DriveError", (Exception,), {}),
@@ -331,6 +355,18 @@ class ScreenTests(StoreTests):
             "/oauth/<platform>/disconnect",
             endpoint="disconnect_social",
             view_func=lambda platform: "",
+            methods=["POST"],
+        )
+        web.add_url_rule(
+            "/agendamento/notificacoes",
+            endpoint="salvar_notificacoes",
+            view_func=lambda: "",
+            methods=["POST"],
+        )
+        web.add_url_rule(
+            "/agendamento/notificacoes/testar",
+            endpoint="testar_telegram",
+            view_func=lambda: "",
             methods=["POST"],
         )
         web.add_url_rule("/privacy", endpoint="privacy", view_func=lambda: "")
@@ -355,6 +391,12 @@ class ScreenTests(StoreTests):
             self.assertNotIn('href="/oauth/youtube"', page)
             self.assertNotIn("Desconectar", page)
             self.assertNotIn("O vídeo será enviado como rascunho", page)
+            self.assertNotIn("Configurações de avisos", page)
+            self.assertNotIn("TESTAR TELEGRAM", page)
+            self.assertNotIn("TELEGRAM_BOT_TOKEN", page)
+            self.assertNotIn("Telegram configurado", page)
+            self.assertNotIn("Telegram não configurado", page)
+            self.assertNotIn("Erro ao ler configurações", page)
             self.assertNotIn("Dashboard", page)
             self.assertNotIn('class="dashboard-sidebar"', page)
             self.assertNotIn("50 MIL cortes virais", page)
@@ -376,6 +418,15 @@ class ScreenTests(StoreTests):
             self.assertIn("Desconectar TikTok", page)
             self.assertIn("Desconectar YouTube", page)
             self.assertIn("O vídeo será enviado como rascunho", page)
+            self.assertIn("<summary>Configurações de avisos</summary>", page)
+            self.assertIn('action="/agendamento/notificacoes"', page)
+            self.assertIn("Salvar avisos", page)
+            self.assertIn('action="/agendamento/notificacoes/testar"', page)
+            self.assertIn("TESTAR TELEGRAM", page)
+            self.assertIn("Outras configurações", page)
+            self.assertNotIn("secret-test-token", page)
+            self.assertNotIn("secret-whatsapp-token", page)
+            self.assertIn('value="test-chat"', page)
             self.assertNotIn("Automático - 4 vídeos por dia", page)
             self.assertNotIn("Link da pasta do Google Drive", page)
 
@@ -409,6 +460,9 @@ class ScreenTests(StoreTests):
             self.assertNotIn("YouTube conectado", page)
             self.assertNotIn("Desconectar", page)
             self.assertNotIn("O vídeo será enviado como rascunho", page)
+            self.assertNotIn("Configurações de avisos", page)
+            self.assertNotIn("TESTAR TELEGRAM", page)
+            self.assertNotIn("TELEGRAM_BOT_TOKEN", page)
             self.assertNotIn("Link da pasta do Google Drive", page)
             self.assertNotIn("Listar pastas", page)
             save_link.assert_called_once_with(folder_link)
@@ -422,6 +476,9 @@ class ScreenTests(StoreTests):
             self.assertIn("Automático - 4 vídeos por dia", page)
             self.assertNotIn('<nav class="social-connections"', page)
             self.assertNotIn("O vídeo será enviado como rascunho", page)
+            self.assertNotIn("Configurações de avisos", page)
+            self.assertNotIn("TESTAR TELEGRAM", page)
+            self.assertNotIn("TELEGRAM_BOT_TOKEN", page)
             self.assertNotIn(folder_link, page)
             load_link.assert_not_called()
 
@@ -438,6 +495,9 @@ class ScreenTests(StoreTests):
             self.assertNotIn("4 vídeos por dia", page)
             self.assertNotIn("TikTok conectado", page)
             self.assertNotIn("O vídeo será enviado como rascunho", page)
+            self.assertNotIn("Configurações de avisos", page)
+            self.assertNotIn("TESTAR TELEGRAM", page)
+            self.assertNotIn("TELEGRAM_BOT_TOKEN", page)
             self.assertNotIn("Link da pasta do Google Drive", page)
 
     def test_automatic_page_has_dashboard_and_automatic_navigation(self):
@@ -465,10 +525,6 @@ class ScreenTests(StoreTests):
                 schedules=[],
                 erro=None,
                 ok=None,
-                notification_fields=[],
-                notification_values={},
-                notification_error=None,
-                telegram_configured=False,
                 warnings=[],
                 csrf_token="test-token",
             )
@@ -478,6 +534,9 @@ class ScreenTests(StoreTests):
         self.assertIn('href="/dashboard">Dashboard</a>', page)
         self.assertIn('href="/agendamento" aria-current="page">Automático</a>', page)
         self.assertIn('href="/configuracao">Configuração</a>', page)
+        self.assertNotIn("Configurações de avisos", page)
+        self.assertNotIn("TESTAR TELEGRAM", page)
+        self.assertNotIn("TELEGRAM_BOT_TOKEN", page)
 
     def test_processed_preview_route_serves_only_the_prepared_report_media(self):
         from flask import Flask, request, send_file, session
