@@ -1,1 +1,48 @@
-<!DOCTYPE html><html lang="pt-BR"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>CIBERCLIPS — Login</title><style>*{box-sizing:border-box}body{margin:0;background:#09090e;color:#f7f5ff;font:15px system-ui,sans-serif;min-height:100vh;display:grid;place-items:center}main{width:min(1100px,94vw);min-height:650px;display:grid;grid-template-columns:1fr 1fr;border:1px solid #292633;border-radius:28px;overflow:hidden;background:#101016}.hero{padding:48px;display:flex;flex-direction:column;justify-content:space-between;background:radial-gradient(ellipse at 65% 45%,#49228c 0, #1d1235 40%,#100d19 80%);position:relative;overflow:hidden}.brand{font-weight:900;letter-spacing:3px;font-size:23px}.mark{display:inline-grid;place-items:center;background:#9762ff;border-radius:10px;width:36px;height:36px;margin-right:10px;color:white}.art{height:220px;display:grid;place-items:center;transform:rotate(-12deg)}.frame{width:78%;aspect-ratio:16/9;border:1px solid #ad8cff;border-radius:18px;background:linear-gradient(135deg,#51349a,#19122c);box-shadow:0 0 65px #9257ff55;display:grid;place-items:center}.play{font-size:48px;color:#e4d6ff}.timeline{display:flex;gap:5px;width:85%;margin-top:-35px}.timeline i{height:26px;flex:1;background:#9663ff;border-radius:4px;opacity:.7}.timeline i:nth-child(2n){background:#d6c1ff}.hero h1{font-size:42px;line-height:1.05;letter-spacing:-2px;margin:20px 0}.hero p,.muted{color:#aaa4b8;line-height:1.6}.login{padding:60px;display:flex;flex-direction:column;justify-content:center}h2{font-size:32px;letter-spacing:-1px;margin:12px 0 0}.tag{color:#bda0ff;font-size:12px;letter-spacing:2px;font-weight:700}label{display:block;margin:22px 0 8px;font-weight:600}input{width:100%;padding:15px;border:1px solid #34303f;border-radius:10px;background:#17151e;color:white;font:inherit;outline:none}input:focus{border-color:#a777ff;box-shadow:0 0 0 3px #9762ff22}.pass{position:relative}.pass input{padding-right:85px}.toggle{position:absolute;right:12px;top:14px;background:none;border:0;color:#bda0ff;cursor:pointer}.enter{width:100%;margin-top:26px;padding:15px;border:0;border-radius:10px;background:linear-gradient(100deg,#7540ed,#a16aff);color:white;font:700 16px system-ui;cursor:pointer}.enter:hover{filter:brightness(1.15)}.remember{display:flex;align-items:center;gap:8px;color:#aaa4b8;font-size:13px;font-weight:400}.remember input{width:auto;accent-color:#9762ff}.foot{font-size:12px;color:#777183;margin-top:40px}#status{color:#cbb6ff;font-size:13px;min-height:20px}@media(max-width:700px){main{grid-template-columns:1fr;margin:20px 0}.hero{padding:28px}.art{display:none}.hero h1{font-size:30px}.login{padding:30px}}</style></head><body><main><section class="hero"><div class="brand"><span class="mark">✂</span>CIBERCLIPS</div><div class="art" aria-hidden="true"><div class="frame"><span class="play">▶</span></div><div class="timeline"><i></i><i></i><i></i><i></i><i></i><i></i></div></div><div><span class="tag">O UNIVERSO DOS CORTES</span><h1>Grandes momentos.<br>Melhores cortes.</h1><p>Seu espaço para transformar conteúdo em impacto.</p></div></section><section class="login"><span class="tag">ÁREA DE ACESSO</span><h2>Bem-vindo de volta.</h2><p class="muted">Entre na sua conta para acessar o painel.</p><form id="form"><label for="user">Login</label><input id="user" autocomplete="username" placeholder="Seu usuário ou e-mail" required><label for="password">Senha</label><div class="pass"><input id="password" type="password" autocomplete="current-password" placeholder="Digite sua senha" required><button type="button" class="toggle" id="toggle">Mostrar</button></div><label class="remember"><input type="checkbox"> Manter conectado</label><button class="enter" type="submit">Entrar no painel →</button><p id="status" role="status"></p></form><div class="foot">© 2026 CIBERCLIPS · Todos os direitos reservados.</div></section></main><script>const p=document.getElementById('password'),t=document.getElementById('toggle');t.onclick=()=>{p.type=p.type==='password'?'text':'password';t.textContent=p.type==='password'?'Mostrar':'Ocultar'};document.getElementById('form').onsubmit=e=>{e.preventDefault();document.getElementById('status').textContent='Interface demonstrativa. Conecte um sistema de autenticação para entrar.'};</script></body></html>
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>CIBERCLIPS — Login</title>
+  <style>*{box-sizing:border-box}body{margin:0;background:#09090e;color:#f7f5ff;font:15px system-ui,sans-serif;min-height:100vh;display:grid;place-items:center}main{width:min(1100px,94vw);min-height:650px;display:grid;grid-template-columns:1fr 1fr;border:1px solid #292633;border-radius:28px;overflow:hidden;background:#101016}.hero{padding:48px;display:flex;flex-direction:column;justify-content:space-between;background:radial-gradient(ellipse at 65% 45%,#49228c 0, #1d1235 40%,#100d19 80%);position:relative;overflow:hidden}.brand{font-weight:900;letter-spacing:3px;font-size:23px}.mark{display:inline-grid;place-items:center;background:#9762ff;border-radius:10px;width:36px;height:36px;margin-right:10px;color:white}.art{height:220px;display:grid;place-items:center;transform:rotate(-12deg)}.frame{width:78%;aspect-ratio:16/9;border:1px solid #ad8cff;border-radius:18px;background:linear-gradient(135deg,#51349a,#19122c);box-shadow:0 0 65px #9257ff55;display:grid;place-items:center}.play{font-size:48px;color:#e4d6ff}.timeline{display:flex;gap:5px;width:85%;margin-top:-35px}.timeline i{height:26px;flex:1;background:#9663ff;border-radius:4px;opacity:.7}.timeline i:nth-child(2n){background:#d6c1ff}.hero h1{font-size:42px;line-height:1.05;letter-spacing:-2px;margin:20px 0}.hero p,.muted{color:#aaa4b8;line-height:1.6}.login{padding:60px;display:flex;flex-direction:column;justify-content:center}h2{font-size:32px;letter-spacing:-1px;margin:12px 0 0}.tag{color:#bda0ff;font-size:12px;letter-spacing:2px;font-weight:700}label{display:block;margin:22px 0 8px;font-weight:600}input{width:100%;padding:15px;border:1px solid #34303f;border-radius:10px;background:#17151e;color:white;font:inherit;outline:none}input:focus{border-color:#a777ff;box-shadow:0 0 0 3px #9762ff22}.pass{position:relative}.pass input{padding-right:85px}.toggle{position:absolute;right:12px;top:14px;background:none;border:0;color:#bda0ff;cursor:pointer}.enter{width:100%;margin-top:26px;padding:15px;border:0;border-radius:10px;background:linear-gradient(100deg,#7540ed,#a16aff);color:white;font:700 16px system-ui;cursor:pointer}.enter:hover{filter:brightness(1.15)}.remember{display:flex;align-items:center;gap:8px;color:#aaa4b8;font-size:13px;font-weight:400}.remember input{width:auto;accent-color:#9762ff}.foot{font-size:12px;color:#777183;margin-top:40px}#status{color:#cbb6ff;font-size:13px;min-height:20px}@media(max-width:700px){main{grid-template-columns:1fr;margin:20px 0}.hero{padding:28px}.art{display:none}.hero h1{font-size:30px}.login{padding:30px}}</style>
+</head>
+<body>
+  <main>
+    <section class="hero">
+      <div class="brand"><span class="mark">✂</span>CIBERCLIPS</div>
+      <div class="art" aria-hidden="true">
+        <div class="frame"><span class="play">▶</span></div>
+        <div class="timeline"><i></i><i></i><i></i><i></i><i></i><i></i></div>
+      </div>
+      <div>
+        <span class="tag">O UNIVERSO DOS CORTES</span>
+        <h1>Grandes momentos.<br>Melhores cortes.</h1>
+        <p>Seu espaço para transformar conteúdo em impacto.</p>
+      </div>
+    </section>
+    <section class="login">
+      <span class="tag">ÁREA DE ACESSO</span>
+      <h2>Bem-vindo de volta.</h2>
+      <p class="muted">Entre na sua conta para acessar o painel.</p>
+      <form id="form" method="post" action="{{ url_for('login_submit') }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <label for="user">Login</label>
+        <input id="user" name="user" autocomplete="username" placeholder="Seu usuário ou e-mail" required>
+        <label for="password">Senha</label>
+        <div class="pass">
+          <input id="password" name="password" type="password" autocomplete="current-password" placeholder="Digite sua senha" required>
+          <button type="button" class="toggle" id="toggle">Mostrar</button>
+        </div>
+        <label class="remember"><input type="checkbox" name="remember" value="1"> Manter conectado</label>
+        <button class="enter" type="submit">Entrar no painel →</button>
+        <p id="status" role="status">{{ error or '' }}</p>
+      </form>
+      <div class="foot">© 2026 CIBERCLIPS · Todos os direitos reservados.</div>
+    </section>
+  </main>
+  <script>
+    const p=document.getElementById('password'),t=document.getElementById('toggle');
+    t.onclick=()=>{p.type=p.type==='password'?'text':'password';t.textContent=p.type==='password'?'Mostrar':'Ocultar'};
+  </script>
+</body>
+</html>

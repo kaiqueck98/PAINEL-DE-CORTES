@@ -794,7 +794,7 @@ def _has_usable_token(token_data):
 
 @app.context_processor
 def social_template_context():
-    if request.endpoint == "login":
+    if request.endpoint in {"login", "login_submit"}:
         return {
             "csrf_token": get_csrf_token(),
             "tiktok_connected": False,
@@ -838,6 +838,7 @@ def social_template_context():
 def require_authenticated_user():
     if request.endpoint in {
         "login",
+        "login_submit",
         "static",
         "tiktok_developers_site_verification",
     }:
@@ -847,46 +848,58 @@ def require_authenticated_user():
     return redirect(url_for("login"))
 
 
-@app.route("/", methods=["GET", "POST"], endpoint="login")
+@app.route("/", methods=["GET"], endpoint="login")
 def login():
     if session.get("authenticated") is True:
         return redirect(url_for("dashboard"))
 
-    error = None
-    if request.method == "POST":
-        csrf_token = session.get("csrf_token", "")
-        supplied_token = request.form.get("csrf_token", "")
-        if not csrf_token or not supplied_token or not secrets.compare_digest(
-            csrf_token, supplied_token
-        ):
-            return Response(
-                "A sessão expirou. Atualize a página e tente novamente.",
-                status=400,
-                mimetype="text/plain",
-            )
-        try:
-            credentials_valid = login_credentials_match(
-                request.form.get("username", ""),
-                request.form.get("password", ""),
-            )
-        except LoginConfigurationError as exc:
-            app.logger.error("Falha ao validar login: %s", exc)
-            return render_template(
-                "login.html",
-                csrf_token=get_csrf_token(),
-                error="Não foi possível validar o login. Tente novamente.",
-            ), 503
-        if credentials_valid:
-            session.clear()
-            session["authenticated"] = True
-            get_csrf_token()
-            return redirect(url_for("dashboard"))
-        error = "Usuário ou senha inválidos."
+    return render_template(
+        "CiberClips.html",
+        csrf_token=get_csrf_token(),
+        error=None,
+    )
+
+
+@app.route("/login", methods=["GET", "POST"], endpoint="login_submit")
+def login_submit():
+    if session.get("authenticated") is True:
+        return redirect(url_for("dashboard"))
+    if request.method == "GET":
+        return redirect(url_for("login"))
+
+    csrf_token = session.get("csrf_token", "")
+    supplied_token = request.form.get("csrf_token", "")
+    if not csrf_token or not supplied_token or not secrets.compare_digest(
+        csrf_token, supplied_token
+    ):
+        return Response(
+            "A sessão expirou. Atualize a página e tente novamente.",
+            status=400,
+            mimetype="text/plain",
+        )
+    try:
+        credentials_valid = login_credentials_match(
+            request.form.get("user", ""),
+            request.form.get("password", ""),
+        )
+    except LoginConfigurationError as exc:
+        app.logger.error("Falha ao validar login: %s", exc)
+        return render_template(
+            "CiberClips.html",
+            csrf_token=get_csrf_token(),
+            error="Não foi possível validar o login. Tente novamente.",
+        ), 503
+    if credentials_valid:
+        session.clear()
+        session.permanent = request.form.get("remember") == "1"
+        session["authenticated"] = True
+        get_csrf_token()
+        return redirect(url_for("dashboard"))
 
     return render_template(
-        "login.html",
+        "CiberClips.html",
         csrf_token=get_csrf_token(),
-        error=error,
+        error="Usuário ou senha inválidos.",
     )
 
 

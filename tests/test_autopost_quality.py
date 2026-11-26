@@ -306,6 +306,7 @@ class ScreenTests(StoreTests):
             "login_credentials_match",
             "require_authenticated_user",
             "login",
+            "login_submit",
             "logout",
         }
         nodes = [
@@ -358,11 +359,19 @@ class ScreenTests(StoreTests):
             response = client.get("/")
             page = response.get_data(as_text=True)
             self.assertEqual(response.status_code, 200)
-            self.assertIn('name="username"', page)
+            self.assertIn('name="user"', page)
             self.assertIn('name="password"', page)
-            self.assertIn(">Entrar</button>", page)
+            self.assertIn("CIBERCLIPS", page)
+            self.assertIn("Bem-vindo de volta.", page)
+            self.assertIn(">Entrar no painel →</button>", page)
+            self.assertIn('action="/login"', page)
+            self.assertNotIn("Interface demonstrativa", page)
             self.assertNotIn("Dashboard", page)
             self.assertNotIn("Automático", page)
+
+            response = client.get("/login")
+            self.assertEqual(response.status_code, 302)
+            self.assertEqual(response.location, "/")
 
             for path in ("/dashboard", "/agendamento", "/configuracao"):
                 response = client.get(path)
@@ -370,17 +379,29 @@ class ScreenTests(StoreTests):
                 self.assertEqual(response.location, "/")
 
             response = client.post(
-                "/", data={"csrf_token": "test-token", "username": "admin", "password": "errada"}
+                "/login", data={"csrf_token": "test-token", "user": "admin", "password": "errada"}
             )
             self.assertEqual(response.status_code, 200)
-            self.assertIn("Usuário ou senha inválidos.", response.get_data(as_text=True))
+            self.assertIn(
+                '<p id="status" role="status">Usuário ou senha inválidos.</p>',
+                response.get_data(as_text=True),
+            )
 
             response = client.post(
-                "/", data={"csrf_token": "test-token", "username": "admin", "password": "diverso123"}
+                "/login",
+                data={
+                    "csrf_token": "test-token",
+                    "user": "admin",
+                    "password": "diverso123",
+                    "remember": "1",
+                },
             )
             self.assertEqual(response.status_code, 302)
             self.assertEqual(response.location, "/dashboard")
+            with client.session_transaction() as state:
+                self.assertTrue(state.permanent)
             self.assertEqual(client.get("/dashboard").get_data(as_text=True), "protected")
+            self.assertEqual(client.get("/").location, "/dashboard")
 
             with client.session_transaction() as state:
                 logout_csrf = state["csrf_token"]
@@ -397,10 +418,10 @@ class ScreenTests(StoreTests):
                 os.environ, {"LOGIN_USER": "operator", "LOGIN_PASS": "senha-segura"}
             ):
                 response = client.post(
-                    "/",
+                    "/login",
                     data={
                         "csrf_token": configured_csrf,
-                        "username": "operator",
+                        "user": "operator",
                         "password": "senha-segura",
                     },
                 )

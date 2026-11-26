@@ -57,11 +57,32 @@ class PanelRouteTests(unittest.TestCase):
         response = client.get("/")
 
         self.assertEqual(response.status_code, 200)
-        self.assertIn(b'name="username"', response.data)
+        self.assertIn(b'name="user"', response.data)
         self.assertIn(b'name="password"', response.data)
-        self.assertIn(b">Entrar</button>", response.data)
+        self.assertIn(b">Entrar no painel \xe2\x86\x92</button>", response.data)
+        self.assertIn(b'action="/login"', response.data)
+        self.assertNotIn(b"Interface demonstrativa", response.data)
         self.assertNotIn(b"Dashboard", response.data)
         self.assertNotIn(b"Link da pasta do Google Drive", response.data)
+
+        with client.session_transaction() as browser_session:
+            csrf_token = browser_session["csrf_token"]
+        response = client.post(
+            "/login",
+            data={"csrf_token": csrf_token, "user": "admin", "password": "incorreta"},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b' id="status" role="status">Usu\xc3\xa1rio ou senha inv\xc3\xa1lidos.</p>', response.data)
+
+        with patch.dict(os.environ, {"LOGIN_USER": "admin", "LOGIN_PASS": "diverso123"}):
+            response = client.post(
+                "/login",
+                data={"csrf_token": csrf_token, "user": "admin", "password": "diverso123"},
+            )
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.location, "/dashboard")
+        with client.session_transaction() as browser_session:
+            self.assertTrue(browser_session["authenticated"])
 
     def test_dashboard_shows_folders_without_rendering_all_videos(self):
         view = {
