@@ -782,7 +782,7 @@ def start_social_oauth(platform):
         return redirect(authorization)
     except social_publishing.SocialPublishingError as exc:
         flash(str(exc), "error")
-        return redirect(url_for("index"))
+        return redirect(url_for("configuration"))
 
 
 @app.route("/oauth/<platform>/callback")
@@ -798,17 +798,17 @@ def social_oauth_callback(platform):
         expected_state, returned_state
     ):
         flash("Não foi possível validar a autorização. Tente conectar novamente.", "error")
-        return redirect(url_for("index"))
+        return redirect(url_for("configuration"))
     if request.args.get("error"):
         flash(f"A autorização foi recusada: {request.args['error']}", "error")
-        return redirect(url_for("index"))
+        return redirect(url_for("configuration"))
     code = request.args.get("code", "")
     if not code:
         flash("A plataforma não retornou um código de autorização.", "error")
-        return redirect(url_for("index"))
+        return redirect(url_for("configuration"))
     if platform == "tiktok" and not code_verifier:
         flash("A sessão PKCE do TikTok expirou. Tente conectar novamente.", "error")
-        return redirect(url_for("index"))
+        return redirect(url_for("configuration"))
     try:
         redirect_override = _oauth_redirect_uri_override(platform)
         kwargs = {"redirect_uri_override": redirect_override} if redirect_override else {}
@@ -823,9 +823,9 @@ def social_oauth_callback(platform):
             social_publishing.exchange_authorization_code(platform, code, **kwargs)
     except social_publishing.SocialPublishingError as exc:
         flash(str(exc), "error")
-        return redirect(url_for("index"))
+        return redirect(url_for("configuration"))
     flash(f"{social_publishing.platform_display_name(platform)} conectado.", "success")
-    return redirect(url_for("index"))
+    return redirect(url_for("configuration"))
 
 
 @app.route("/oauth/<platform>/disconnect", methods=["POST"])
@@ -848,9 +848,9 @@ def disconnect_social(platform):
         social_publishing.delete_social_token(platform)
     except social_publishing.SocialPublishingError as exc:
         flash(str(exc), "error")
-        return redirect(url_for("index"))
+        return redirect(url_for("configuration"))
     flash(f"{social_publishing.platform_display_name(platform)} desconectado.", "success")
-    return redirect(url_for("index"))
+    return redirect(url_for("configuration"))
 
 
 @app.route("/tiktok-developers-site-verification.txt")
@@ -930,6 +930,7 @@ def terms():
     )
 
 
+@app.route("/configuracao", methods=["GET"], endpoint="configuration")
 @app.route("/dashboard", methods=["GET", "POST"], endpoint="dashboard")
 @app.route("/", methods=["GET", "POST"], endpoint="index")
 def index():
@@ -937,6 +938,7 @@ def index():
     error = None
     folder_link = ""
     dashboard_view = request.endpoint == "dashboard"
+    configuration_view = request.endpoint == "configuration"
     submitted_folder_link = False
     path_ids = []
     sort_order = ""
@@ -1109,6 +1111,7 @@ def index():
         folder_model=folder_model,
         error=error,
         dashboard_view=dashboard_view,
+        configuration_view=configuration_view,
     )
 
 
@@ -2740,6 +2743,7 @@ label{display:block;font-weight:600}.hero button{width:100%;font-size:18px}img{w
 <nav class="automatic-sidebar" aria-label="Navegação principal">
 <a href="{{ url_for('dashboard') }}">Dashboard</a>
 <a href="{{ url_for('agendamento_page') }}" aria-current="page">Automático</a>
+<a href="{{ url_for('configuration') }}">Configuração</a>
 </nav><main><h1>Automático</h1>
 <p class="muted">Até 4 vídeos distintos. Conteúdo → nota → melhoria → título → capa → postagem.</p>
 {% if erro %}<p class="notice" role="alert">{{ erro }}</p>{% endif %}

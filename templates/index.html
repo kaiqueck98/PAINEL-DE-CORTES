@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="csrf-token" content="{{ csrf_token }}">
-  <title>{% if dashboard_view %}Dashboard{% else %}Painel de Cortes Prontos{% endif %}</title>
+  <title>{% if dashboard_view %}Dashboard{% elif configuration_view %}Configuração{% else %}Painel de Cortes Prontos{% endif %}</title>
   <style>
     :root {
       color-scheme: dark;
@@ -132,19 +132,19 @@
     }
   </style>
 </head>
-<body class="{% if dashboard_view %}has-dashboard-sidebar{% endif %}">
-  {% if dashboard_view %}
+<body class="{% if dashboard_view or configuration_view %}has-dashboard-sidebar{% endif %}">
+  {% if dashboard_view or configuration_view %}
     <nav class="dashboard-sidebar" aria-label="Navegação principal">
-      <a href="{{ url_for('dashboard') }}" aria-current="page">Dashboard</a>
+      <a href="{{ url_for('dashboard') }}"{% if dashboard_view %} aria-current="page"{% endif %}>Dashboard</a>
       <a href="{{ url_for('agendamento_page') }}">Automático</a>
+      <a href="{{ url_for('configuration') }}"{% if configuration_view %} aria-current="page"{% endif %}>Configuração</a>
     </nav>
   {% endif %}
   <main>
     {% if dashboard_view %}
       <h1>Dashboard</h1>
-    {% else %}
-      <h1>Painel de Cortes Prontos</h1>
-      <a href="{{ url_for('agendamento_page') }}" style="display:block;margin-top:20px;padding:16px;border-radius:14px;background:#7c3aed;color:#fff;font-weight:700;text-align:center;text-decoration:none;font-size:1rem">📅 Automático - 4 vídeos por dia - 08:00, 12:30, 18:00, 21:00 - Clique aqui</a>
+    {% elif configuration_view %}
+      <h1>Configuração</h1>
 
       <nav class="social-connections" aria-label="Conectar redes sociais">
         <div class="connection-group">
@@ -179,6 +179,9 @@
       <section class="social-publishing-options" aria-label="Envio de rascunhos ao TikTok">
         <p>O vídeo será enviado como rascunho para a caixa de entrada do TikTok. Abra a notificação no TikTok para adicionar texto, editar e publicar.</p>
       </section>
+    {% else %}
+      <h1>Painel de Cortes Prontos</h1>
+      <a href="{{ url_for('agendamento_page') }}" style="display:block;margin-top:20px;padding:16px;border-radius:14px;background:#7c3aed;color:#fff;font-weight:700;text-align:center;text-decoration:none;font-size:1rem">📅 Automático - 4 vídeos por dia - 08:00, 12:30, 18:00, 21:00 - Clique aqui</a>
 
       <form method="post">
         <label for="folder_link">Link da pasta do Google Drive</label>

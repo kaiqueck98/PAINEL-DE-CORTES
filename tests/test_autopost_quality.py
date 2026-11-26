@@ -328,7 +328,7 @@ class ScreenTests(StoreTests):
         web.add_url_rule("/agendamento", endpoint="agendamento_page", view_func=lambda: "")
         web.add_url_rule("/oauth/<platform>", endpoint="start_social_oauth", view_func=lambda platform: "")
         web.add_url_rule(
-            "/disconnect/<platform>",
+            "/oauth/<platform>/disconnect",
             endpoint="disconnect_social",
             view_func=lambda platform: "",
             methods=["POST"],
@@ -346,19 +346,38 @@ class ScreenTests(StoreTests):
                 "Automático - 4 vídeos por dia - 08:00, 12:30, 18:00, 21:00",
                 page,
             )
-            self.assertIn("TikTok conectado", page)
-            self.assertIn("YouTube conectado", page)
-            self.assertIn("O vídeo será enviado como rascunho", page)
             self.assertIn("Link da pasta do Google Drive", page)
             self.assertIn("Listar pastas", page)
             self.assertIn('placeholder="Cole o link aqui..."', page)
             self.assertNotIn(folder_link, page)
-            self.assertIn("Desconectar", page)
+            self.assertNotIn('<nav class="social-connections"', page)
+            self.assertNotIn('href="/oauth/tiktok"', page)
+            self.assertNotIn('href="/oauth/youtube"', page)
+            self.assertNotIn("Desconectar", page)
+            self.assertNotIn("O vídeo será enviado como rascunho", page)
             self.assertNotIn("Dashboard", page)
             self.assertNotIn('class="dashboard-sidebar"', page)
             self.assertNotIn("50 MIL cortes virais", page)
             self.assertNotIn('class="content-panel"', page)
             self.assertNotIn("value=\"https://drive.google.com/drive/folders/", page)
+
+            response = client.get("/configuracao")
+            self.assertEqual(response.status_code, 200)
+            page = response.get_data(as_text=True)
+            self.assertIn("<title>Configuração</title>", page)
+            self.assertIn("<h1>Configuração</h1>", page)
+            self.assertIn('href="/dashboard">Dashboard</a>', page)
+            self.assertIn('href="/agendamento">Automático</a>', page)
+            self.assertIn('href="/configuracao" aria-current="page">Configuração</a>', page)
+            self.assertIn("TikTok conectado ✅", page)
+            self.assertIn("YouTube conectado ✅", page)
+            self.assertIn('action="/oauth/tiktok/disconnect"', page)
+            self.assertIn('action="/oauth/youtube/disconnect"', page)
+            self.assertIn("Desconectar TikTok", page)
+            self.assertIn("Desconectar YouTube", page)
+            self.assertIn("O vídeo será enviado como rascunho", page)
+            self.assertNotIn("Automático - 4 vídeos por dia", page)
+            self.assertNotIn("Link da pasta do Google Drive", page)
 
             get_folder_view.side_effect = namespace["DriveError"]("Drive indisponível")
             response = client.post("/", data={"folder_link": folder_link})
@@ -382,6 +401,7 @@ class ScreenTests(StoreTests):
             self.assertIn("Automático", page)
             self.assertIn('href="/dashboard"', page)
             self.assertIn('href="/agendamento"', page)
+            self.assertIn('href="/configuracao"', page)
             self.assertNotIn(folder_link, page)
             self.assertNotIn("Painel de Cortes Prontos", page)
             self.assertNotIn("4 vídeos por dia", page)
@@ -400,7 +420,8 @@ class ScreenTests(StoreTests):
             self.assertNotIn("50 MIL cortes virais", page)
             self.assertNotIn("Dashboard", page)
             self.assertIn("Automático - 4 vídeos por dia", page)
-            self.assertIn("TikTok conectado", page)
+            self.assertNotIn('<nav class="social-connections"', page)
+            self.assertNotIn("O vídeo será enviado como rascunho", page)
             self.assertNotIn(folder_link, page)
             load_link.assert_not_called()
 
@@ -411,6 +432,7 @@ class ScreenTests(StoreTests):
             self.assertIn("50 MIL cortes virais", page)
             self.assertIn("Dashboard", page)
             self.assertIn("Automático", page)
+            self.assertIn("Configuração", page)
             self.assertNotIn(folder_link, page)
             self.assertNotIn("Painel de Cortes Prontos", page)
             self.assertNotIn("4 vídeos por dia", page)
@@ -435,6 +457,7 @@ class ScreenTests(StoreTests):
         web = Flask("isolated_automatic_navigation_test")
         web.add_url_rule("/dashboard", endpoint="dashboard", view_func=lambda: "")
         web.add_url_rule("/agendamento", endpoint="agendamento_page", view_func=lambda: "")
+        web.add_url_rule("/configuracao", endpoint="configuration", view_func=lambda: "")
 
         with web.test_request_context():
             page = render_template_string(
@@ -454,6 +477,7 @@ class ScreenTests(StoreTests):
         self.assertIn("<h1>Automático</h1>", page)
         self.assertIn('href="/dashboard">Dashboard</a>', page)
         self.assertIn('href="/agendamento" aria-current="page">Automático</a>', page)
+        self.assertIn('href="/configuracao">Configuração</a>', page)
 
     def test_processed_preview_route_serves_only_the_prepared_report_media(self):
         from flask import Flask, request, send_file, session
