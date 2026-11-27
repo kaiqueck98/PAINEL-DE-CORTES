@@ -249,7 +249,43 @@
                 </div>
               </div>
             </form>
+            <button id="drive-test-button" type="button" data-endpoint="{{ url_for('test_drive_connection') }}">TESTAR DRIVE</button>
+            <p id="drive-test-status" role="status" aria-live="polite" hidden></p>
           </section>
+          <script>
+            (() => {
+              const button = document.getElementById('drive-test-button');
+              const status = document.getElementById('drive-test-status');
+              const input = document.getElementById('drive_folder_link');
+              if (!button || !status || !input) return;
+              button.addEventListener('click', async () => {
+                button.disabled = true;
+                status.hidden = false;
+                status.textContent = 'Testando o Drive...';
+                try {
+                  const response = await fetch(button.dataset.endpoint, {
+                    method: 'POST',
+                    headers: {
+                      'Content-Type': 'application/json',
+                      'X-CSRF-Token': document.querySelector('[name="csrf_token"]')?.value || ''
+                    },
+                    body: JSON.stringify({folder_link: input.value.trim()}),
+                    cache: 'no-store'
+                  });
+                  const result = await response.json();
+                  status.textContent = response.ok
+                    ? result.message
+                    : 'Drive com erro: ' + (result.error || 'Falha ao testar o Google Drive.');
+                  status.setAttribute('role', response.ok ? 'status' : 'alert');
+                } catch (error) {
+                  status.textContent = 'Drive com erro: ' + (error.message || 'Falha ao testar o Google Drive.');
+                  status.setAttribute('role', 'alert');
+                } finally {
+                  button.disabled = false;
+                }
+              });
+            })();
+          </script>
 
           <section class="card config-section" aria-labelledby="social-heading">
             <h3 id="social-heading">Conectar redes sociais</h3>
@@ -421,6 +457,7 @@
                     <h2 id="clips-preview-title"></h2>
                     <button id="clips-preview-close-x" class="video-preview-close-x" type="button" aria-label="Fechar pr&eacute;via">X</button>
                   </header>
+                  <p id="clips-preview-status" role="status" aria-live="polite" hidden></p>
                   <video id="clips-preview-player" class="video-preview" controls playsinline preload="metadata"></video>
                   <button id="clips-preview-close" class="video-preview-close-button" type="button">Fechar</button>
                 </section>

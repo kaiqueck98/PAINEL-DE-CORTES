@@ -9,6 +9,7 @@ import time
 import unittest
 from copy import deepcopy
 from pathlib import Path
+from urllib.error import HTTPError
 from unittest.mock import patch
 
 import app
@@ -39,6 +40,27 @@ class DriveFolderTests(unittest.TestCase):
     def test_rejects_non_drive_links(self):
         with self.assertRaises(ValueError):
             app.extract_folder_id("https://example.com/folders/abc123")
+
+    def test_drive_api_errors_are_normalized_for_the_user(self):
+        self.assertEqual(
+            app.normalize_drive_error(
+                400,
+                {"error": {"message": "API key not valid", "errors": [{"reason": "keyInvalid"}]}},
+                "secret-key",
+            ),
+            "403 - API key inválida",
+        )
+        self.assertEqual(
+            app.normalize_drive_error(404, {"error": {"message": "File not found"}}),
+            "404 - arquivo não encontrado",
+        )
+        self.assertEqual(
+            app.normalize_drive_error(
+                403,
+                {"error": {"message": "Daily limit exceeded", "errors": [{"reason": "dailyLimitExceeded"}]}},
+            ),
+            "Quota excedida",
+        )
 
 
 class PanelRouteTests(unittest.TestCase):
@@ -501,6 +523,7 @@ class PanelRouteTests(unittest.TestCase):
         page = response.get_data(as_text=True)
         self.assertEqual(response.status_code, 200)
         self.assertIn("Pasta principal do Google Drive", page)
+        self.assertIn("TESTAR DRIVE", page)
         self.assertIn("Conectar TikTok", page)
         self.assertIn("Conectar Instagram", page)
         self.assertIn("Conectar YouTube", page)
@@ -701,36 +724,201 @@ class PanelRouteTests(unittest.TestCase):
 
     def test_download_streams_drive_content_as_attachment(self):
         content = b"video bytes"
-        with patch.dict(os.environ, {"DRIVE_API_KEY": "test-key"}), patch.object(
-            app, "urlopen", return_value=FakeDriveResponse(content)
-        ) as open_url:
+        with tempfile.TemporaryDirectory() as temp_dir, patch.object(
+            app.tempfile, "gettempdir", return_value=temp_dir
+        ), patch.object(app, "CLIPS_VIDEO_CACHE", {}), patch.dict(
+            os.environ, {"DRIVE_API_KEY": "test-key"}
+        ), patch.object(app, "urlopen", return_value=FakeDriveResponse(content)) as open_url:
             response = self.client.get("/download/video123?filename=meu%20corte.mp4")
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.data, content)
+            self.assertIn('attachment; filename="meu_corte.mp4"', response.headers["Content-Disposition"])
+            self.assertIn("alt=media", open_url.call_args.args[0].full_url)
+            response.close()
 
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.data, content)
-        self.assertIn('attachment; filename="meu_corte.mp4"', response.headers["Content-Disposition"])
-        self.assertIn("alt=media", open_url.call_args.args[0].full_url)
-
-    def test_original_preview_streams_range_requests(self):
-        response_content = b"234"
-        drive_response = FakeDriveResponse(
-            response_content,
-            status=206,
-            headers={"Content-Range": "bytes 2-4/10"},
-        )
-        with patch.dict(os.environ, {"DRIVE_API_KEY": "test-key"}), patch.object(
-            app, "urlopen", return_value=drive_response
-        ) as open_url:
+    def test_original_preview_serves_range_from_server_download(self):
+        drive_content = b"0123456789"
+        with tempfile.TemporaryDirectory() as temp_dir, patch.object(
+            app.tempfile, "gettempdir", return_value=temp_dir
+        ), patch.object(app, "CLIPS_VIDEO_CACHE", {}), patch.dict(
+            os.environ, {"DRIVE_API_KEY": "test-key"}
+        ), patch.object(app, "urlopen", return_value=FakeDriveResponse(drive_content)) as open_url:
             response = self.client.get(
                 "/stream/video123?filename=corte.mp4",
                 headers={"Range": "bytes=2-4"},
             )
+            self.assertEqual(response.status_code, 206)
+            self.assertEqual(response.data, b"234")
+            self.assertEqual(response.headers["Content-Range"], "bytes 2-4/10")
+            self.assertIn('inline; filename="corte.mp4"', response.headers["Content-Disposition"])
+            self.assertIsNone(open_url.call_args.args[0].get_header("Range"))
+            response.close()
 
-        self.assertEqual(response.status_code, 206)
-        self.assertEqual(response.data, response_content)
-        self.assertEqual(response.headers["Content-Range"], "bytes 2-4/10")
-        self.assertIn("inline;", response.headers["Content-Disposition"])
-        self.assertEqual(open_url.call_args.args[0].get_header("Range"), "bytes=2-4")
+    def test_preview_endpoint_displays_the_normalized_drive_error(self):
+        with self.client.session_transaction() as browser_session:
+            browser_session["csrf_token"] = "csrf-test"
+        with patch.object(
+            app,
+            "cached_drive_video_path",
+            side_effect=app.DriveDownloadError("403 - API key inválida"),
+        ):
+            response = self.client.get(
+                "/api/clips-preview/video123",
+                headers={"X-CSRF-Token": "csrf-test"},
+            )
+
+        self.assertEqual(response.status_code, 502)
+        self.assertEqual(response.get_json()["error"], "403 - API key inválida")
+
+    def test_drive_download_retries_once_and_reports_public_sharing_error(self):
+        error_body = json.dumps({
+            "error": {
+                "code": 403,
+                "message": "The caller does not have permission",
+                "errors": [{"reason": "forbidden"}],
+            }
+        }).encode("utf-8")
+
+        def forbidden_response():
+            return HTTPError(
+                "https://www.googleapis.com/drive/v3/files/video123",
+                403,
+                "Forbidden",
+                {},
+                io.BytesIO(error_body),
+            )
+
+        with tempfile.TemporaryDirectory() as temp_dir, patch.object(
+            app, "urlopen", side_effect=[forbidden_response(), forbidden_response()]
+        ) as open_url, self.assertLogs(app.app.logger, level="ERROR") as captured:
+            destination = os.path.join(temp_dir, "video.mp4")
+            with self.assertRaises(app.DriveDownloadError) as raised:
+                app.download_drive_video("video123", "test-key", destination)
+
+        self.assertEqual(
+            str(raised.exception),
+            "403 - arquivo não compartilhado como Qualquer pessoa com o link",
+        )
+        self.assertEqual(open_url.call_count, 2)
+        self.assertFalse(os.path.exists(destination))
+        self.assertIn("403 - arquivo não compartilhado", "\n".join(captured.output))
+
+    def test_drive_test_downloads_the_smallest_video_and_reports_count(self):
+        with self.client.session_transaction() as browser_session:
+            browser_session["csrf_token"] = "csrf-test"
+        view = {
+            "warnings": [],
+            "all_videos": [
+                {"id": "larger", "name": "larger.mp4", "size": "900"},
+                {"id": "smaller", "name": "smaller.mp4", "size": "90"},
+            ],
+        }
+        with patch.dict(os.environ, {"DRIVE_API_KEY": "test-key"}), patch.object(
+            app, "get_folder_view", return_value=view
+        ), patch.object(app, "download_drive_video") as download:
+            response = self.client.post(
+                "/api/drive-test",
+                json={"folder_link": "https://drive.google.com/drive/folders/test-folder"},
+                headers={"X-CSRF-Token": "csrf-test"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["message"], "Drive OK - achou 2 vídeos")
+        self.assertEqual(download.call_args.args[:2], ("smaller", "test-key"))
+
+    def test_automatic_analysis_stops_after_the_first_drive_download_error(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = app.autopost.AutopostStore(os.path.join(temp_dir, "queue.sqlite3"))
+            store.initialize()
+            schedule_id = store.create_schedule(
+                "test-folder", "Pasta principal", 4,
+                ["08:00", "12:30", "18:00", "21:00"], ["youtube", "tiktok"],
+                "America/Sao_Paulo", "2026-11-27", draft=False,
+            )
+            schedule = store.get_schedule(schedule_id)
+            run_date = "2026-11-27"
+            videos = [
+                {"id": f"video-{index}", "name": f"video-{index}.mp4"}
+                for index in range(324)
+            ]
+            attempts = []
+
+            def fail_download(video, destination, progress):
+                attempts.append(video["id"])
+                raise app.DriveDownloadError("403 - API key inválida")
+
+            with patch.object(app.autopost, "validar_analise_conteudo"), patch.object(
+                app.autopost, "carregar_tendencias", return_value={}
+            ), self.assertRaises(app.DriveDownloadError):
+                app.autopost.preparar_melhores_do_dia(
+                    store,
+                    schedule,
+                    run_date,
+                    videos,
+                    lambda video_id, destination, progress=None: None,
+                    set(),
+                    sample_download=fail_download,
+                )
+
+            day, _ = store.get_day(schedule_id, run_date)
+            candidates = store.review_candidates(schedule_id, run_date)
+
+        self.assertEqual(attempts, ["video-0"])
+        self.assertEqual(day["status"], "error")
+        self.assertTrue(day["message"].startswith(
+            "Drive com erro - arrume em Configura\u00e7\u00f5es: 403 - API key inv\u00e1lida"
+        ))
+        self.assertEqual(len(candidates), 1)
+
+    def test_automatic_pauses_after_a_real_drive_error(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = app.autopost.AutopostStore(os.path.join(temp_dir, "queue.sqlite3"))
+            store.initialize()
+            now = app.schedule_now()
+            run_date = now.strftime("%Y-%m-%d")
+            updated_at = now.isoformat(timespec="seconds")
+            schedule_id = store.create_schedule(
+                "test-folder", "Pasta principal", 4,
+                ["08:00", "12:30", "18:00", "21:00"], ["youtube", "tiktok"],
+                "America/Sao_Paulo", updated_at,
+            )
+            store.set_automatic_control(True, schedule_id, run_date, updated_at)
+            cancel_event = threading.Event()
+            view = {
+                "warnings": [],
+                "all_videos": [{
+                    "id": "video-1",
+                    "name": "video-1.mp4",
+                    "size": "1000",
+                    "videoMediaMetadata": {
+                        "durationMillis": "60000", "width": "720", "height": "1280"
+                    },
+                }],
+            }
+            with patch.object(app, "AUTPOST_STORE", store), patch.dict(
+                os.environ, {"DRIVE_API_KEY": "test-key"}
+            ), patch.object(app, "get_folder_view", return_value=view), patch.object(
+                app, "load_social_posts", return_value={}
+            ), patch.object(app, "load_posted_video_ids", return_value=set()), patch.object(
+                app.autopost,
+                "preparar_melhores_do_dia",
+                side_effect=app.DriveDownloadError("403 - API key inválida"),
+            ), patch.dict(
+                app.AUTOMATIC_ANALYSIS_CANCEL_EVENTS,
+                {schedule_id: cancel_event},
+            ), patch.object(app, "remove_autopost_schedule_jobs"):
+                app.prepare_schedule_content(schedule_id, cancel_event)
+                control = store.automatic_control()
+                schedule = store.get_schedule(schedule_id)
+                day, _ = store.get_day(schedule_id, run_date)
+
+        self.assertFalse(control["enabled"])
+        self.assertEqual(schedule["status"], "paused")
+        self.assertTrue(cancel_event.is_set())
+        self.assertEqual(day["status"], "error")
+        self.assertTrue(day["message"].startswith(
+            "Drive com erro - arrume em Configura\u00e7\u00f5es: 403 - API key inv\u00e1lida"
+        ))
 
     def test_improved_output_download_keeps_preview_file_available(self):
         with tempfile.TemporaryDirectory() as directory:

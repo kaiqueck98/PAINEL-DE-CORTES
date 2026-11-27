@@ -1,4 +1,5 @@
 import atexit
+import hashlib
 import json
 import mimetypes
 import os
@@ -18,7 +19,6 @@ from urllib.parse import parse_qs, quote, urlencode, urlparse
 from urllib.request import Request, urlopen
 
 import pytz
-import requests
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from dotenv import load_dotenv
@@ -29,7 +29,7 @@ SOCIAL_TOKEN_ENCRYPTION_KEY_CONFIGURED = bool(
     os.environ.get("SOCIAL_TOKEN_ENCRYPTION_KEY", "").strip()
 )
 
-from flask import Flask, Response, flash, jsonify, redirect, render_template, render_template_string, request, send_file, session, stream_with_context, url_for
+from flask import Flask, Response, flash, jsonify, redirect, render_template, render_template_string, request, send_file, session, url_for
 from sqlalchemy import Column, DateTime, Integer, String, Text, UniqueConstraint, create_engine, inspect as sqlalchemy_inspect, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import declarative_base, sessionmaker
@@ -86,6 +86,9 @@ AUTOMATIC_ANALYSIS_CANCEL_EVENTS = {}
 CLIPS_LIBRARY_CACHE = {}
 CLIPS_LIBRARY_CACHE_LOCK = threading.Lock()
 CLIPS_LIBRARY_CACHE_TTL = 120
+CLIPS_VIDEO_CACHE = {}
+CLIPS_VIDEO_CACHE_LOCK = threading.Lock()
+CLIPS_VIDEO_CACHE_TTL = 900
 AUTPOST_SCHEDULER = BackgroundScheduler(timezone=AUTPOST_TIMEZONE)
 AUTPOST_SCHEDULER_LOCK = threading.Lock()
 AUTPOST_SCHEDULER_STARTED = False
@@ -354,6 +357,144 @@ class DriveError(Exception):
     pass
 
 
+class DriveDownloadError(autopost.VideoDownloadError):
+    fatal_drive_error = True
+
+
+def normalize_drive_error(status, details=None, api_key=""):
+    error = details.get("error", {}) if isinstance(details, dict) else {}
+    message = str(error.get("message", "Falha ao acessar o Google Drive."))
+    reasons = {
+        str(item.get("reason", "")).casefold()
+        for item in error.get("errors", [])
+        if isinstance(item, dict)
+    }
+    lowered = message.casefold()
+    if api_key:
+        message = message.replace(api_key, "[redacted]")
+        lowered = message.casefold()
+    if (
+        "apikeyinvalid" in reasons
+        or "keyinvalid" in reasons
+        or "api key not valid" in lowered
+        or "invalid api key" in lowered
+        or "api_key_invalid" in lowered
+    ):
+        return "403 - API key inválida"
+    if any(
+        any(marker in reason for marker in ("quota", "ratelimit", "limitexceeded"))
+        for reason in reasons
+    ) or "quota" in lowered:
+        return "Quota excedida"
+    if status == 404 or "notfound" in reasons:
+        return "404 - arquivo não encontrado"
+    if status == 403:
+        return "403 - arquivo não compartilhado como Qualquer pessoa com o link"
+    if status:
+        return f"{status} - {message}"
+    return message
+
+
+def _drive_http_error(error, api_key=""):
+    try:
+        details = json.loads(error.read().decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError, AttributeError):
+        details = {}
+    return normalize_drive_error(error.code, details, api_key)
+
+
+def download_drive_video(video_id, api_key, destination, progress_callback=None, max_bytes=None):
+    """Download a Drive file server-side in chunks, retrying once on failure."""
+    if not api_key:
+        raise DriveDownloadError("Configure DRIVE_API_KEY no servidor para baixar vídeos.")
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", str(video_id or "")):
+        raise DriveDownloadError("404 - arquivo não encontrado")
+    destination = os.fspath(destination)
+    destination_directory = os.path.dirname(os.path.abspath(destination))
+    os.makedirs(destination_directory, exist_ok=True)
+    url = (
+        f"{DRIVE_API_BASE}/files/{quote(str(video_id), safe='')}?"
+        f"{urlencode({'alt': 'media', 'key': api_key})}"
+    )
+    headers = {"Range": f"bytes=0-{int(max_bytes) - 1}"} if max_bytes else {}
+    last_error = None
+
+    for attempt in range(2):
+        temporary_path = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                prefix="drive-download-", suffix=".part", dir=destination_directory,
+                delete=False,
+            ) as temporary_file:
+                temporary_path = temporary_file.name
+
+            try:
+                response = urlopen(Request(url, headers=headers), timeout=90)
+            except HTTPError as error:
+                raise DriveDownloadError(_drive_http_error(error, api_key)) from None
+            except (URLError, TimeoutError, OSError) as error:
+                raise DriveDownloadError(
+                    "Não foi possível conectar ao Google Drive para baixar o vídeo."
+                ) from error
+
+            try:
+                try:
+                    expected_size = int(response.headers.get("Content-Length", 0) or 0)
+                except (TypeError, ValueError):
+                    expected_size = 0
+                if max_bytes:
+                    expected_size = min(expected_size, int(max_bytes)) if expected_size else int(max_bytes)
+                downloaded = 0
+                with response, open(temporary_path, "wb") as output:
+                    while True:
+                        chunk = response.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        if max_bytes:
+                            chunk = chunk[: max(0, int(max_bytes) - downloaded)]
+                            if not chunk:
+                                break
+                        output.write(chunk)
+                        downloaded += len(chunk)
+                        if progress_callback and expected_size:
+                            progress_callback(min(downloaded / expected_size, 1.0))
+                        if max_bytes and downloaded >= int(max_bytes):
+                            break
+                if downloaded <= 0:
+                    raise DriveDownloadError("O Drive não retornou dados para este vídeo.")
+                if not max_bytes and expected_size and downloaded < expected_size:
+                    raise DriveDownloadError(
+                        "A conexão com o Google Drive foi interrompida durante o download."
+                    )
+                os.replace(temporary_path, destination)
+                temporary_path = None
+                if progress_callback:
+                    progress_callback(1.0)
+                return destination
+            finally:
+                response.close()
+        except DriveDownloadError as error:
+            last_error = error
+        except OSError as error:
+            last_error = DriveDownloadError(
+                "Não foi possível salvar o vídeo temporário do Google Drive."
+            )
+            last_error.__cause__ = error
+        finally:
+            if temporary_path and os.path.exists(temporary_path):
+                try:
+                    os.remove(temporary_path)
+                except OSError:
+                    app.logger.warning("Não foi possível limpar um arquivo temporário do Drive.")
+
+        app.logger.warning(
+            "Falha no download do Drive para o arquivo %s (tentativa %s/2): %s",
+            video_id, attempt + 1, last_error,
+        )
+    app.logger.error("Download do Drive interrompido para o arquivo %s: %s", video_id, last_error)
+    raise last_error
+
+
 class GoodVideosError(Exception):
     pass
 
@@ -410,12 +551,7 @@ def drive_api_get(path, params, api_key):
         with urlopen(url, timeout=20) as response:
             return json.loads(response.read().decode("utf-8"))
     except HTTPError as error:
-        try:
-            details = json.loads(error.read().decode("utf-8"))
-            message = details.get("error", {}).get("message", "Falha ao consultar o Google Drive.")
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            message = "Falha ao consultar o Google Drive."
-        raise DriveError(message) from error
+        raise DriveError(_drive_http_error(error, api_key)) from None
     except (URLError, TimeoutError) as error:
         raise DriveError("Não foi possível conectar à API do Google Drive.") from error
     except (json.JSONDecodeError, UnicodeDecodeError) as error:
@@ -2150,7 +2286,10 @@ def start_automatic():
             ).start()
         flash("Automático iniciado. Preparando os vídeos de hoje.", "success")
     except (ValueError, DriveError, AutomationSettingsError, autopost.AutopostStoreError, OSError) as exc:
-        flash(f"Não foi possível iniciar o Automático: {exc}", "error")
+        if isinstance(exc, DriveError):
+            flash(f"Drive com erro - arrume em Configura\u00e7\u00f5es: {exc}", "error")
+        else:
+            flash(f"Não foi possível iniciar o Automático: {exc}", "error")
     return redirect(url_for("dashboard", page="automatic"))
 
 
@@ -2233,6 +2372,11 @@ def clips_library_api():
                     video_id=video["id"],
                     filename=video.get("name", "video.mp4"),
                 ),
+                "prepare_preview_url": url_for(
+                    "prepare_clips_preview",
+                    video_id=video["id"],
+                    filename=video.get("name", "video.mp4"),
+                ),
             })
         next_offset = offset + len(videos) if offset + len(videos) < total else None
         return jsonify(
@@ -2246,7 +2390,57 @@ def clips_library_api():
     except (AutomationSettingsError, ValueError) as exc:
         return jsonify(error=str(exc)), 400
     except DriveError as exc:
+        app.logger.error("Falha ao carregar Meus cortes do Drive: %s", exc)
         return jsonify(error=str(exc)), 503
+
+
+@app.route("/api/drive-test", methods=["POST"])
+def test_drive_connection():
+    expected = session.get("csrf_token", "")
+    supplied = request.headers.get("X-CSRF-Token", "")
+    if not expected or not supplied or not secrets.compare_digest(expected, supplied):
+        return jsonify(error="Atualize a página para testar o Drive."), 403
+    payload = request.get_json(silent=True) or {}
+    temporary_path = None
+    try:
+        folder_link = str(payload.get("folder_link", "")).strip() or load_drive_folder_link()
+        if not folder_link:
+            return jsonify(error="Informe ou salve a pasta do Drive em Configura\u00e7\u00f5es."), 400
+        api_key = os.environ.get("DRIVE_API_KEY", "").strip()
+        if not api_key:
+            raise DriveError("Configure DRIVE_API_KEY no servidor.")
+        folder_id = extract_folder_id(folder_link)
+        view = get_folder_view(folder_id, api_key)
+        if view.get("warnings"):
+            raise DriveError("Listagem incompleta: " + "; ".join(view["warnings"]))
+        videos = view.get("all_videos", view.get("videos", []))
+        if not videos:
+            raise DriveError("Nenhum vídeo foi encontrado na pasta do Drive.")
+        def size_key(video):
+            try:
+                return max(0, int(video.get("size", 0) or 0))
+            except (TypeError, ValueError):
+                return float("inf")
+        smallest = min(videos, key=size_key)
+        suffix = os.path.splitext(smallest.get("name", ""))[1] or ".video"
+        with tempfile.NamedTemporaryFile(
+            prefix="drive-test-", suffix=suffix,
+            dir=tempfile.gettempdir(), delete=False,
+        ) as temporary_file:
+            temporary_path = temporary_file.name
+        download_drive_video(smallest["id"], api_key, temporary_path)
+        return jsonify(message=f"Drive OK - achou {len(videos)} vídeos")
+    except (DriveError, DriveDownloadError, ValueError, AutomationSettingsError) as exc:
+        app.logger.error("Teste do Drive falhou: %s", exc)
+        return jsonify(error=str(exc)), 502
+    finally:
+        if temporary_path:
+            try:
+                os.remove(temporary_path)
+            except FileNotFoundError:
+                pass
+            except OSError:
+                app.logger.warning("Não foi possível remover o arquivo temporário do teste do Drive.")
 
 
 def update_improvement_job(job_id, **updates):
@@ -2279,41 +2473,13 @@ def cleanup_expired_improvement_jobs():
         remove_improvement_files(job.get("workdir"))
 
 
-def download_drive_video_for_job(job_id, video_id, api_key, destination):
-    params = urlencode({"alt": "media", "key": api_key})
-    url = f"{DRIVE_API_BASE}/files/{quote(video_id, safe='')}?{params}"
-    try:
-        response = urlopen(url, timeout=60)
-    except HTTPError as error:
-        try:
-            details = json.loads(error.read().decode("utf-8"))
-            message = details.get("error", {}).get("message", "Falha ao baixar vídeo do Google Drive.")
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            message = "Falha ao baixar vídeo do Google Drive."
-        raise RuntimeError(message) from error
-    except (URLError, TimeoutError) as error:
-        raise RuntimeError("Não foi possível conectar ao Google Drive para processar o vídeo.") from error
-
-    try:
-        total_size = int(response.headers.get("Content-Length", 0))
-    except (TypeError, ValueError):
-        total_size = 0
-    downloaded = 0
-    with response, open(destination, "wb") as file:
-        while True:
-            chunk = response.read(1024 * 1024)
-            if not chunk:
-                break
-            file.write(chunk)
-            downloaded += len(chunk)
-            if total_size:
-                fraction = min(downloaded / total_size, 1)
-                update_improvement_job(
-                    job_id,
-                    progress=round(fraction * 25),
-                    message=f"Baixando vídeo: {round(fraction * 100)}%",
-                )
-
+def improvement_download_progress(job_id, fraction):
+    progress = round(max(0.0, min(1.0, float(fraction))) * 25)
+    update_improvement_job(
+        job_id,
+        progress=progress,
+        message=f"Baixando v\u00eddeo: {round(fraction * 100)}%",
+    )
 
 def run_ffmpeg(ffmpeg_path, input_path, output_path, job_id, duration_ms):
     filters = (
@@ -2407,7 +2573,10 @@ def process_improvement_job(job_id, video_id, filename, duration_ms, api_key, ff
             message="Baixando vídeo do Drive...",
             workdir=workdir,
         )
-        download_drive_video_for_job(job_id, video_id, api_key, input_path)
+        download_drive_video(
+            video_id, api_key, input_path,
+            progress_callback=lambda fraction: improvement_download_progress(job_id, fraction),
+        )
         update_improvement_job(
             job_id,
             status="processing",
@@ -2551,79 +2720,87 @@ def preview_improved_video(job_id):
     )
 
 
+def cached_drive_video_path(video_id, api_key):
+    now = time.time()
+    expired_paths = []
+    with CLIPS_VIDEO_CACHE_LOCK:
+        for cached_id, (cached_path, cached_at) in list(CLIPS_VIDEO_CACHE.items()):
+            if now - cached_at > CLIPS_VIDEO_CACHE_TTL or not os.path.isfile(cached_path):
+                CLIPS_VIDEO_CACHE.pop(cached_id, None)
+                expired_paths.append(cached_path)
+        cached = CLIPS_VIDEO_CACHE.get(video_id)
+        if cached and os.path.isfile(cached[0]):
+            CLIPS_VIDEO_CACHE[video_id] = (cached[0], now)
+            return cached[0]
+
+    cache_directory = os.path.join(tempfile.gettempdir(), "ciberclips-drive-preview")
+    os.makedirs(cache_directory, exist_ok=True)
+    filename = hashlib.sha256(video_id.encode("utf-8")).hexdigest() + ".video"
+    destination = os.path.join(cache_directory, filename)
+    if os.path.isfile(destination) and now - os.path.getmtime(destination) <= CLIPS_VIDEO_CACHE_TTL:
+        with CLIPS_VIDEO_CACHE_LOCK:
+            CLIPS_VIDEO_CACHE[video_id] = (destination, now)
+        return destination
+    for expired_path in expired_paths:
+        try:
+            if os.path.dirname(os.path.abspath(expired_path)) == os.path.abspath(cache_directory):
+                os.remove(expired_path)
+        except OSError:
+            pass
+    download_drive_video(video_id, api_key, destination)
+    with CLIPS_VIDEO_CACHE_LOCK:
+        CLIPS_VIDEO_CACHE[video_id] = (destination, time.time())
+    return destination
+
+
 def drive_video_response(video_id, as_attachment):
     if not re.fullmatch(r"[A-Za-z0-9_-]+", video_id):
-        return Response("ID de vídeo inválido.", status=400, mimetype="text/plain")
+        return Response("ID de v?deo inv?lido.", status=400, mimetype="text/plain")
     api_key = os.environ.get("DRIVE_API_KEY", "").strip()
     if not api_key:
         return Response(
-            "Configure a variável DRIVE_API_KEY para acessar vídeos.",
+            "Configure DRIVE_API_KEY no servidor para acessar v\u00eddeos.",
             status=503,
             mimetype="text/plain",
         )
-
-    params = urlencode({"alt": "media", "key": api_key})
-    url = f"{DRIVE_API_BASE}/files/{quote(video_id, safe='')}?{params}"
-    range_header = request.headers.get("Range", "")
-    if range_header and (
-        not re.fullmatch(r"bytes=\d*-\d*(?:,\d*-\d*)*", range_header)
-        or range_header == "bytes=-"
-    ):
-        return Response("Intervalo de bytes inválido.", status=416, mimetype="text/plain")
-    headers = {"Range": range_header} if range_header else {}
-    try:
-        upstream = urlopen(Request(url, headers=headers), timeout=60)
-    except HTTPError as error:
-        if error.code == 416:
-            response_headers = {"Accept-Ranges": "bytes"}
-            content_range = error.headers.get("Content-Range")
-            if content_range:
-                response_headers["Content-Range"] = content_range
-            return Response(status=416, headers=response_headers)
-        try:
-            details = json.loads(error.read().decode("utf-8"))
-            message = details.get("error", {}).get("message", "Falha ao acessar vídeo do Google Drive.")
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            message = "Falha ao acessar vídeo do Google Drive."
-        return Response(message, status=error.code, mimetype="text/plain")
-    except (URLError, TimeoutError):
-        return Response(
-            "Não foi possível conectar ao Google Drive para acessar o vídeo.",
-            status=502,
-            mimetype="text/plain",
-        )
-
     filename = secure_filename(request.args.get("filename", "")) or video_id
-    response_headers = {
-        "Accept-Ranges": "bytes",
-        "Content-Disposition": f'{"attachment" if as_attachment else "inline"}; filename="{filename}"',
-        "Cache-Control": "no-store",
-    }
-    for header in ("Content-Length", "Content-Range", "ETag", "Last-Modified"):
-        value = upstream.headers.get(header)
-        if value:
-            response_headers[header] = value
-    content_type = upstream.headers.get("Content-Type", "")
-    if not content_type or content_type == "application/octet-stream":
-        content_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
-
-    def stream_video():
-        try:
-            while True:
-                chunk = upstream.read(1024 * 1024)
-                if not chunk:
-                    break
-                yield chunk
-        finally:
-            upstream.close()
-
-    return Response(
-        stream_with_context(stream_video()),
-        status=getattr(upstream, "status", 200),
-        headers=response_headers,
-        content_type=content_type,
+    try:
+        local_path = cached_drive_video_path(video_id, api_key)
+    except DriveDownloadError as exc:
+        app.logger.error("Falha na resposta de v?deo do Drive (%s): %s", video_id, exc)
+        return Response(str(exc), status=502, mimetype="text/plain; charset=utf-8")
+    response = send_file(
+        local_path,
+        mimetype=mimetypes.guess_type(filename)[0] or "application/octet-stream",
+        as_attachment=as_attachment,
+        download_name=filename,
+        conditional=True,
+        max_age=0,
     )
+    disposition = "attachment" if as_attachment else "inline"
+    response.headers["Content-Disposition"] = f'{disposition}; filename="{filename}"'
+    return response
 
+
+@app.route("/api/clips-preview/<video_id>")
+def prepare_clips_preview(video_id):
+    expected = session.get("csrf_token", "")
+    supplied = request.headers.get("X-CSRF-Token", "")
+    if not expected or not supplied or not secrets.compare_digest(expected, supplied):
+        return jsonify(error="Atualize a p?gina para abrir a pr?via."), 403
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", video_id):
+        return jsonify(error="ID de v?deo inv?lido."), 400
+    api_key = os.environ.get("DRIVE_API_KEY", "").strip()
+    try:
+        cached_drive_video_path(video_id, api_key)
+        return jsonify(preview_url=url_for(
+            "stream_original_video",
+            video_id=video_id,
+            filename=request.args.get("filename", "video.mp4"),
+        ))
+    except DriveDownloadError as exc:
+        app.logger.error("Falha ao preparar pr?via do Drive (%s): %s", video_id, exc)
+        return jsonify(error=str(exc)), 502
 
 def update_social_post_job(job_id, **updates):
     with SOCIAL_POST_JOBS_LOCK:
@@ -2669,44 +2846,19 @@ def copy_completed_improvement(video_id, destination_dir):
 def download_video_for_social_post(
     job_id, video_id, api_key, destination, progress_callback=None
 ):
-    params = urlencode({"alt": "media", "key": api_key})
-    url = f"{DRIVE_API_BASE}/files/{quote(video_id, safe='')}?{params}"
-    try:
-        response = urlopen(url, timeout=60)
-    except HTTPError as error:
-        try:
-            details = json.loads(error.read().decode("utf-8"))
-            message = details.get("error", {}).get("message", "Falha ao baixar vídeo do Google Drive.")
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            message = "Falha ao baixar vídeo do Google Drive."
-        raise autopost.VideoDownloadError(message) from error
-    except (URLError, TimeoutError) as error:
-        raise autopost.VideoDownloadError("Não foi possível conectar ao Google Drive para preparar a publicação.") from error
+    def report_progress(fraction):
+        if progress_callback:
+            progress_callback(fraction)
+        bounded = max(0.0, min(1.0, float(fraction)))
+        update_social_post_job(
+            job_id,
+            progress=round(bounded * 25),
+            message=f"Baixando v\u00eddeo: {round(bounded * 100)}%",
+        )
 
-    try:
-        total_size = int(response.headers.get("Content-Length", 0))
-    except (TypeError, ValueError):
-        total_size = 0
-    downloaded = 0
-    with response, open(destination, "wb") as file:
-        while True:
-            chunk = response.read(1024 * 1024)
-            if not chunk:
-                break
-            file.write(chunk)
-            downloaded += len(chunk)
-            if total_size:
-                fraction = min(downloaded / total_size, 1)
-                if progress_callback:
-                    progress_callback(fraction)
-                update_social_post_job(
-                    job_id,
-                    progress=round(fraction * 25),
-                    message=f"Baixando vídeo: {round(fraction * 100)}%",
-                )
-    if progress_callback:
-        progress_callback(1.0)
-
+    return download_drive_video(
+        video_id, api_key, destination, progress_callback=report_progress
+    )
 
 def download_video_sample_for_analysis(video, api_key, destination, progress_callback):
     duration_ms = int(
@@ -2718,14 +2870,6 @@ def download_video_sample_for_analysis(video, api_key, destination, progress_cal
         )
 
     sample_limit = 5 * 1024 * 1024
-    try:
-        expected_bytes = min(
-            max(int(video.get("size", 0) or 0), 0) or sample_limit,
-            sample_limit,
-        )
-    except (TypeError, ValueError):
-        expected_bytes = sample_limit
-
     temporary_source = None
     try:
         with tempfile.NamedTemporaryFile(
@@ -2734,59 +2878,17 @@ def download_video_sample_for_analysis(video, api_key, destination, progress_cal
         ) as temporary_file:
             temporary_source = temporary_file.name
 
-        url = (
-            f"{DRIVE_API_BASE}/files/"
-            f"{quote(video['id'], safe='')}"
+        def sample_progress(fraction):
+            progress_callback(0.5 * max(0.0, min(1.0, float(fraction))))
+
+        download_drive_video(
+            video["id"], api_key, temporary_source,
+            progress_callback=sample_progress, max_bytes=sample_limit,
         )
-        try:
-            response = requests.get(
-                url,
-                params={"alt": "media", "key": api_key},
-                headers={"Range": f"bytes=0-{sample_limit - 1}"},
-                stream=True,
-                timeout=(10, 60),
-            )
-        except requests.RequestException as exc:
-            raise autopost.VideoDownloadError(
-                "Não foi possível conectar ao Google Drive para baixar o trecho."
-            ) from exc
-
-        try:
-            with response:
-                try:
-                    response.raise_for_status()
-                except requests.HTTPError as exc:
-                    try:
-                        details = response.json()
-                        message = details.get("error", {}).get(
-                            "message", "Falha ao baixar vídeo do Google Drive."
-                        )
-                    except (ValueError, AttributeError):
-                        message = "Falha ao baixar vídeo do Google Drive."
-                    message = str(message).replace(api_key, "[redacted]")
-                    raise autopost.VideoDownloadError(message) from exc
-
-                downloaded = 0
-                with open(temporary_source, "wb") as source_file:
-                    for chunk in response.iter_content(chunk_size=1024 * 1024):
-                        if not chunk:
-                            continue
-                        chunk = chunk[:sample_limit - downloaded]
-                        source_file.write(chunk)
-                        downloaded += len(chunk)
-                        progress_callback(
-                            0.5 * min(downloaded / expected_bytes, 1.0)
-                        )
-                        if downloaded >= sample_limit:
-                            break
-        except requests.RequestException as exc:
-            raise autopost.VideoDownloadError(
-                "A conexão com o Google Drive foi interrompida durante o download."
-            ) from exc
-
+        downloaded = os.path.getsize(temporary_source)
         if not downloaded:
             raise autopost.VideoDownloadError(
-                "O Drive não retornou um trecho de vídeo analisável."
+                "O Drive n\u00e3o retornou um trecho de v\u00eddeo analis\u00e1vel."
             )
 
         ffmpeg, _ = autopost._media_tools()
@@ -3635,18 +3737,46 @@ def prepare_schedule_content(schedule_id, cancel_event=None):
     except autopost.AnalysisCancelledError:
         return
     except Exception as exc:
-        app.logger.error('Falha na preparação de conteúdo: %s', exc)
+        app.logger.error("Falha na prepara\u00e7\u00e3o de conte\u00fado: %s", exc)
+        drive_failed = isinstance(exc, (DriveError, DriveDownloadError))
+        drive_prefix = "Drive com erro - arrume em Configura\u00e7\u00f5es: "
+        detail = str(exc)
+        message = (
+            detail if drive_failed and detail.startswith(drive_prefix)
+            else drive_prefix + detail if drive_failed else detail
+        )
         try:
             day, _ = AUTPOST_STORE.get_day(schedule_id, run_date)
             if not day or day["status"] != "error":
-                message = str(exc)
                 if isinstance(exc, MemoryError):
-                    message = "Estourou a memória durante a análise dos vídeos do Drive."
+                    message = "Estourou a mem\u00f3ria durante a an\u00e1lise dos v\u00eddeos do Drive."
                 AUTPOST_STORE.fail_analysis(schedule_id, run_date, message)
         except autopost.AutopostStoreError:
-            app.logger.exception("Não foi possível registrar erro da análise.")
-        AUTPOST_STORE.finish_slot(schedule_id, run_date, 'preparacao',
-                                 'failed', str(exc), now.isoformat(timespec='seconds'))
+            app.logger.exception("N\u00e3o foi poss\u00edvel registrar erro da an\u00e1lise.")
+        if drive_failed:
+            try:
+                updated_at = schedule_now().isoformat(timespec="seconds")
+                with AUTOMATIC_PAGE_LOCK:
+                    control = AUTPOST_STORE.automatic_control()
+                    if control.get("schedule_id") == schedule_id:
+                        AUTPOST_STORE.set_automatic_control(
+                            False, schedule_id, run_date, updated_at
+                        )
+                    active_schedule = AUTPOST_STORE.get_schedule(schedule_id)
+                    if active_schedule and active_schedule.get("status") == "active":
+                        AUTPOST_STORE.update_schedule_status(
+                            schedule_id, "paused", updated_at
+                        )
+                    event = AUTOMATIC_ANALYSIS_CANCEL_EVENTS.pop(schedule_id, None)
+                    if event:
+                        event.set()
+                    remove_autopost_schedule_jobs(schedule_id)
+            except (autopost.AutopostStoreError, ValueError):
+                app.logger.exception("N\u00e3o foi poss\u00edvel parar o Autom\u00e1tico ap\u00f3s erro do Drive.")
+        AUTPOST_STORE.finish_slot(
+            schedule_id, run_date, "preparacao", "failed", message,
+            now.isoformat(timespec="seconds"),
+        )
 
 
 def run_schedule_slot(schedule_id, slot_time):
@@ -3654,6 +3784,7 @@ def run_schedule_slot(schedule_id, slot_time):
     run_date = now.strftime("%Y-%m-%d")
     now_text = now.isoformat(timespec="seconds")
     claimed = False
+    schedule = None
     try:
         run_date = schedule_now().strftime("%Y-%m-%d")
         control = AUTPOST_STORE.automatic_control()
@@ -3732,7 +3863,35 @@ def run_schedule_slot(schedule_id, slot_time):
         SocialPostsError,
         autopost.AutopostStoreError,
     ) as exc:
-        app.logger.error("Falha no agendamento %s (%s): %s", schedule_id, slot_time, exc)
+        drive_failed = isinstance(exc, (DriveError, DriveDownloadError))
+        drive_prefix = "Drive com erro - arrume em Configura\u00e7\u00f5es: "
+        detail = str(exc)
+        message = (
+            detail if drive_failed and detail.startswith(drive_prefix)
+            else drive_prefix + detail if drive_failed else detail
+        )
+        app.logger.error("Falha no agendamento %s (%s): %s", schedule_id, slot_time, message)
+        if drive_failed and is_automatic_dashboard_schedule(schedule):
+            try:
+                AUTPOST_STORE.fail_analysis(schedule_id, run_date, message)
+                updated_at = schedule_now().isoformat(timespec="seconds")
+                with AUTOMATIC_PAGE_LOCK:
+                    control = AUTPOST_STORE.automatic_control()
+                    if control.get("schedule_id") == schedule_id:
+                        AUTPOST_STORE.set_automatic_control(
+                            False, schedule_id, run_date, updated_at
+                        )
+                    active_schedule = AUTPOST_STORE.get_schedule(schedule_id)
+                    if active_schedule and active_schedule.get("status") == "active":
+                        AUTPOST_STORE.update_schedule_status(
+                            schedule_id, "paused", updated_at
+                        )
+                    event = AUTOMATIC_ANALYSIS_CANCEL_EVENTS.pop(schedule_id, None)
+                    if event:
+                        event.set()
+                    remove_autopost_schedule_jobs(schedule_id)
+            except (autopost.AutopostStoreError, ValueError):
+                app.logger.exception("N\u00e3o foi poss\u00edvel parar o Autom\u00e1tico ap\u00f3s erro do Drive.")
         if claimed:
             try:
                 AUTPOST_STORE.finish_slot(
@@ -3740,7 +3899,7 @@ def run_schedule_slot(schedule_id, slot_time):
                     run_date,
                     slot_time,
                     "failed",
-                    str(exc),
+                    message,
                     schedule_now().isoformat(timespec="seconds"),
                 )
             except autopost.AutopostStoreError:
@@ -4004,6 +4163,7 @@ CLIPS_LIBRARY_SCRIPT = r"""
   const loadMore = document.getElementById('clips-load-more');
   const modal = document.getElementById('clips-preview-modal');
   const previewTitle = document.getElementById('clips-preview-title');
+  const previewStatus = document.getElementById('clips-preview-status');
   const player = document.getElementById('clips-preview-player');
   const csrf = () => document.querySelector('[name="csrf_token"]')?.value || '';
   let nextOffset = 0;
@@ -4012,6 +4172,7 @@ CLIPS_LIBRARY_SCRIPT = r"""
   let requestController = null;
   let searchTimer = null;
   let previewOpener = null;
+  let previewRequest = 0;
 
   function makeCard(video) {
     const card = document.createElement('article');
@@ -4111,27 +4272,63 @@ CLIPS_LIBRARY_SCRIPT = r"""
     }
   }
 
-  function openPreview(video, opener) {
+  async function openPreview(video, opener) {
     previewOpener = opener;
+    const currentRequest = ++previewRequest;
     previewTitle.textContent = video.name;
-    player.src = video.preview_url;
+    player.pause();
+    player.removeAttribute('src');
+    player.load();
+    player.hidden = true;
+    previewStatus.hidden = false;
+    previewStatus.setAttribute('role', 'status');
+    previewStatus.textContent = 'Baixando prévia do Drive...';
     modal.hidden = false;
     document.getElementById('clips-preview-close-x').focus();
+    try {
+      const response = await fetch(video.prepare_preview_url, {
+        headers: {'X-CSRF-Token': csrf()},
+        cache: 'no-store',
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Falha ao preparar a prévia.');
+      if (modal.hidden || currentRequest !== previewRequest) return;
+      player.src = data.preview_url;
+      player.hidden = false;
+      player.load();
+      previewStatus.hidden = true;
+    } catch (error) {
+      if (modal.hidden || currentRequest !== previewRequest) return;
+      previewStatus.hidden = false;
+      previewStatus.textContent = 'Não conseguiu baixar do Drive: ' + error.message
+        + ' - confira em Configurações se a pasta está como Qualquer pessoa com o link pode ver';
+      previewStatus.setAttribute('role', 'alert');
+    }
   }
 
   function closePreview(event) {
     event?.preventDefault();
     if (modal.hidden) return;
+    previewRequest += 1;
     modal.hidden = true;
     player.pause();
     player.removeAttribute('src');
     player.load();
+    player.hidden = false;
+    previewStatus.hidden = true;
+    previewStatus.textContent = '';
     previewOpener?.focus();
     previewOpener = null;
   }
 
   document.getElementById('clips-preview-close-x').onclick = closePreview;
   document.getElementById('clips-preview-close').onclick = closePreview;
+  player.addEventListener('error', () => {
+    if (modal.hidden || !player.src) return;
+    previewStatus.hidden = false;
+    previewStatus.setAttribute('role', 'alert');
+    previewStatus.textContent = 'Não conseguiu reproduzir a prévia do Drive. Confira em Configurações se a pasta está como Qualquer pessoa com o link pode ver.';
+  });
   modal.addEventListener('keydown', event => {
     if (event.key === 'Escape') event.preventDefault();
   });
@@ -4264,13 +4461,17 @@ AUTOMATIC_QUEUE_SCRIPT = r"""
     const days = data.content?.days || [];
     const day = days[0] || null;
     const enabled = Boolean(data.automatic_enabled);
+    const driveFailure = day?.status === 'error'
+      && String(day?.message || '').startsWith('Drive com erro - arrume em Configura\u00e7\u00f5es:');
     const failed = (data.content?.candidates || []).filter(video =>
       ['error', 'excluded'].includes(String(video.status || '').toLowerCase()));
     if (!enabled) {
-      progress.value = 0;
-      progressPercent.textContent = '0%';
-      progressLabel.textContent = 'Pausado - clique em INICIAR';
-      progressDetail.textContent = 'Fila pausada.';
+      progress.value = driveFailure ? Math.max(0, Math.min(100, Number(day?.progress) || 0)) : 0;
+      progressPercent.textContent = progress.value + '%';
+      progressLabel.textContent = driveFailure
+        ? 'Drive com erro - arrume em Configura\u00e7\u00f5es'
+        : 'Pausado - clique em INICIAR';
+      progressDetail.textContent = driveFailure ? day.message : 'Fila pausada.';
       skipped.hidden = failed.length === 0;
       if (failed.length) {
         skipped.querySelector('summary').textContent = `${failed.length} ${failed.length === 1 ? 'vídeo pulado' : 'vídeos pulados'} - ver detalhes`;
@@ -4320,12 +4521,15 @@ AUTOMATIC_QUEUE_SCRIPT = r"""
     const percent = Math.max(0, Math.min(100, Number(day?.progress) || 0));
     progress.value = percent;
     progressPercent.textContent = percent + '%';
-    progressLabel.textContent = `Analisando vídeos... ${Math.min(4, readyCount)} de 4`;
+    progressLabel.textContent = driveFailure
+      ? 'Drive com erro - arrume em Configura\u00e7\u00f5es'
+      : `Analisando v\u00eddeos... ${Math.min(4, readyCount)} de 4`;
     progressDetail.textContent = review?.status === 'confirmed'
       ? `Fila confirmada para ${review.target_date}.`
-      : (isAnalyzing ? 'Preparando os vídeos para a fila de hoje...'
-        : day?.status === 'error' ? 'Análise concluída com erro.'
-          : percent === 100 ? 'Análise concluída.' : 'Preparando os vídeos...');
+      : (driveFailure ? day.message
+        : isAnalyzing ? 'Preparando os v\u00eddeos para a fila de hoje...'
+          : day?.status === 'error' ? 'An\u00e1lise conclu\u00edda com erro.'
+            : percent === 100 ? 'An\u00e1lise conclu\u00edda.' : 'Preparando os v\u00eddeos...');
     skipped.hidden = failed.length === 0;
     if (failed.length) {
       skipped.querySelector('summary').textContent = `${failed.length} ${failed.length === 1 ? 'vídeo pulado' : 'vídeos pulados'} - ver detalhes`;
@@ -4533,11 +4737,14 @@ TITLE_EDITOR_SCRIPT = r"""
           && progress === 100 && reportedErrorCount === 0 && errorReports.length === 0;
         progressBar.value = progress;
         progressPercent.textContent = progress + '%';
-        progressMessage.textContent = errorSummary?.[1]
-          || (currentDay.status === 'error' ? 'Análise concluída com erro.'
-            : currentDay.status === 'analyzing'
-              ? `Analisando vídeos... ${currentDay.current_index || 0} de ${currentDay.total || 0}.`
-              : progress === 100 ? 'Análise concluída.' : 'Preparando os vídeos...');
+        const driveFailure = currentDay.status === 'error'
+          && String(currentDay.message || '').startsWith('Drive com erro - arrume em Configura\u00e7\u00f5es:');
+        progressMessage.textContent = driveFailure ? currentDay.message
+          : (errorSummary?.[1]
+            || (currentDay.status === 'error' ? 'An\u00e1lise conclu\u00edda com erro.'
+              : currentDay.status === 'analyzing'
+                ? `Analisando v\u00eddeos... ${currentDay.current_index || 0} de ${currentDay.total || 0}.`
+                : progress === 100 ? 'An\u00e1lise conclu\u00edda.' : 'Preparando os v\u00eddeos...'));
         progressCard.classList.toggle('has-error', hasError);
         progressCard.classList.toggle('is-success', isSuccess);
         progressMessage.setAttribute('role', hasError ? 'alert' : 'status');

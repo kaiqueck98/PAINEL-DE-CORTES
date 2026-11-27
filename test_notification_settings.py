@@ -124,19 +124,10 @@ class NotificationSettingsTests(unittest.TestCase):
             def wait(self, timeout=None):
                 return 0
 
-        class SampleResponse:
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *args):
-                return None
-
-            def raise_for_status(self):
-                return None
-
-            def iter_content(self, chunk_size):
-                self.chunk_size = chunk_size
-                yield b"source sample"
+        class SampleResponse(io.BytesIO):
+            def __init__(self):
+                super().__init__(b"source sample")
+                self.headers = {"Content-Length": "13"}
 
         with tempfile.TemporaryDirectory() as temp_dir:
             destination = os.path.join(temp_dir, "sample.mp4")
@@ -150,7 +141,7 @@ class NotificationSettingsTests(unittest.TestCase):
             progress = []
             with patch.object(app.autopost, "_media_tools", return_value=("ffmpeg", "ffprobe")), \
                     patch.object(app.subprocess, "Popen", side_effect=start_process), \
-                    patch.object(app.requests, "get", return_value=SampleResponse()) as get:
+                    patch.object(app, "urlopen", return_value=SampleResponse()) as open_url:
                 app.download_video_sample_for_analysis(
                     {
                         "id": "drive-video",
@@ -171,7 +162,7 @@ class NotificationSettingsTests(unittest.TestCase):
         self.assertEqual(command[command.index("-threads") + 1], "1")
         self.assertEqual(progress[-1], 1.0)
         self.assertEqual(
-            get.call_args.kwargs["headers"]["Range"], "bytes=0-5242879"
+            open_url.call_args.args[0].get_header("Range"), "bytes=0-5242879"
         )
 
     def test_automatic_schedule_still_creates_a_preview(self):

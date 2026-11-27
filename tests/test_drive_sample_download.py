@@ -2,10 +2,8 @@ import ast
 import os
 import subprocess
 import tempfile
-import types
 import unittest
 from pathlib import Path
-from urllib.parse import quote
 from unittest.mock import Mock, patch
 
 
@@ -23,11 +21,13 @@ class DriveSampleDownloadTests(unittest.TestCase):
         )
 
         sample = b"video sample"
-        response = Mock()
-        response.__enter__ = Mock(return_value=response)
-        response.__exit__ = Mock(return_value=False)
-        response.iter_content.return_value = iter([sample[:5], sample[5:]])
-        response.raise_for_status.return_value = None
+        downloads = []
+
+        def download_drive_video(video_id, api_key, destination, progress_callback=None, max_bytes=None):
+            downloads.append((video_id, api_key, max_bytes))
+            Path(destination).write_bytes(sample)
+            if progress_callback:
+                progress_callback(1.0)
 
         class FakeProcess:
             command = None
@@ -48,29 +48,22 @@ class DriveSampleDownloadTests(unittest.TestCase):
                     raise AssertionError("FFmpeg timeout must remain bounded.")
                 return 0
 
-        fake_requests = types.SimpleNamespace(
-            get=Mock(return_value=response),
-            RequestException=Exception,
-            HTTPError=Exception,
-        )
-        fake_autopost = types.SimpleNamespace(
-            _media_tools=Mock(return_value=("ffmpeg", "ffprobe")),
-            VideoDownloadError=type("VideoDownloadError", (Exception,), {}),
-        )
-        fake_subprocess = types.SimpleNamespace(
-            Popen=FakeProcess,
-            PIPE=subprocess.PIPE,
-            CREATE_NO_WINDOW=0,
-            TimeoutExpired=subprocess.TimeoutExpired,
-        )
+        class FakeAutopost:
+            _media_tools = Mock(return_value=("ffmpeg", "ffprobe"))
+            VideoDownloadError = type("VideoDownloadError", (Exception,), {})
+
+        class FakeSubprocess:
+            Popen = FakeProcess
+            PIPE = subprocess.PIPE
+            CREATE_NO_WINDOW = 0
+            TimeoutExpired = subprocess.TimeoutExpired
+
         namespace = {
             "os": os,
             "tempfile": tempfile,
-            "requests": fake_requests,
-            "autopost": fake_autopost,
-            "subprocess": fake_subprocess,
-            "quote": quote,
-            "DRIVE_API_BASE": "https://www.googleapis.com/drive/v3",
+            "autopost": FakeAutopost,
+            "subprocess": FakeSubprocess,
+            "download_drive_video": download_drive_video,
         }
 
         with tempfile.TemporaryDirectory() as directory:
@@ -92,17 +85,7 @@ class DriveSampleDownloadTests(unittest.TestCase):
                     progress.append,
                 )
 
-                fake_requests.get.assert_called_once_with(
-                    "https://www.googleapis.com/drive/v3/files/drive-video",
-                    params={"alt": "media", "key": "test-drive-key"},
-                    headers={"Range": "bytes=0-5242879"},
-                    stream=True,
-                    timeout=(10, 60),
-                )
-                self.assertEqual(
-                    response.iter_content.call_args.kwargs["chunk_size"],
-                    1024 * 1024,
-                )
+                self.assertEqual(downloads, [("drive-video", "test-drive-key", 5 * 1024 * 1024)])
                 self.assertEqual(FakeProcess.input_contents, sample)
                 self.assertFalse(FakeProcess.input_path.startswith("https://"))
                 self.assertFalse(Path(FakeProcess.input_path).exists())

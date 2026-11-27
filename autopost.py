@@ -1177,8 +1177,8 @@ def _retry_download_once(destination, operation):
     for attempt in range(2):
         try:
             return operation()
-        except Exception:
-            if attempt:
+        except Exception as exc:
+            if attempt or getattr(exc, "fatal_drive_error", False):
                 raise
             try:
                 os.remove(destination)
@@ -1220,6 +1220,8 @@ def _preparar_melhores_do_dia(
         return f"Vídeo {index} pulado - {reason}; não há mais vídeos para tentar"
 
     def failure_reason(exc):
+        if getattr(exc, "fatal_drive_error", False):
+            return str(exc)
         message = str(exc).casefold()
         if any(
             marker in message
@@ -1245,6 +1247,20 @@ def _preparar_melhores_do_dia(
         if isinstance(exc, VideoDownloadError):
             return "erro do Drive"
         return "erro de análise"
+
+    def stop_on_drive_error(report, exc):
+        if not getattr(exc, "fatal_drive_error", False):
+            return
+        message = f"Drive com erro - arrume em Configura\u00e7\u00f5es: {exc}"
+        report.update(
+            status="error",
+            message=message,
+            reasons=[str(exc)],
+            error_detail=str(exc),
+        )
+        store.save_candidate(schedule['id'], run_date, lease, report)
+        raise exc.__class__(message) from exc
+
 
     try:
         validar_analise_conteudo()
@@ -1375,6 +1391,7 @@ def _preparar_melhores_do_dia(
                 raise
             except Exception as exc:
                 _check_analysis_cancelled(cancel_check)
+                stop_on_drive_error(report, exc)
                 reason = failure_reason(exc)
                 report["error_detail"] = str(exc)
                 report.update(
@@ -1454,6 +1471,7 @@ def _preparar_melhores_do_dia(
                         raise
                     except Exception as exc:
                         _check_analysis_cancelled(cancel_check)
+                        stop_on_drive_error(report, exc)
                         if success_count:
                             success_count -= 1
                         error_count += 1
@@ -1959,15 +1977,20 @@ class AutopostStore:
                 f"Pronto! {success_count} de {total}, "
                 f"{success_count} deram certo, {error_count} deram erro."
             )
+            drive_failure = bool(
+                error and error.startswith(
+                    "Drive com erro - arrume em Configura\u00e7\u00f5es:"
+                )
+            )
             cursor = connection.execute(
                 "UPDATE content_days SET status=?, message=?, updated=?, "
                 "current_index=?, progress=? WHERE schedule_id=? AND run_date=? AND lease=?",
                 (
                     'error' if error else 'ready',
-                    f"{error} {summary}" if error else summary,
+                    error if drive_failure else f"{error} {summary}" if error else summary,
                     time.time(),
-                    total,
-                    100,
+                    day["current_index"] if drive_failure else total,
+                    day["progress"] if drive_failure else 100,
                     schedule_id,
                     run_date,
                     lease,
