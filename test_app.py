@@ -4,6 +4,7 @@ import io
 import json
 import os
 import tempfile
+import threading
 import time
 import unittest
 from copy import deepcopy
@@ -53,7 +54,35 @@ class PanelRouteTests(unittest.TestCase):
         self.drive_link_patch.start()
         self.addCleanup(self.drive_link_patch.stop)
 
-    def test_automatic_dashboard_creates_a_server_side_four_video_queue(self):
+    def test_automatic_dashboard_stays_paused_until_the_user_starts_it(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = app.autopost.AutopostStore(os.path.join(temp_dir, "queue.sqlite3"))
+            store.initialize()
+            previous_testing = app.app.testing
+            app.app.testing = True
+            self.addCleanup(setattr, app.app, "testing", previous_testing)
+            with patch.object(app, "AUTPOST_STORE", store), patch.object(
+                app, "prepare_schedule_content"
+            ) as prepare:
+                response = self.client.get("/dashboard?page=automatic")
+                second_response = self.client.get("/dashboard?page=automatic")
+
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(second_response.status_code, 200)
+            self.assertIn(b'data-page="automatic"', response.data)
+            self.assertIn(b"Status: DESLIGADO", response.data)
+            self.assertIn(b"INICIAR AUTOM", response.data)
+            self.assertNotIn(b"PARAR AUTOM", response.data)
+            self.assertIn(b"Pausado - clique em INICIAR", response.data)
+            self.assertIn(b"At&eacute; 4 v&iacute;deos distintos por dia", response.data)
+            self.assertIn(b"VER PR&Eacute;VIA", response.data)
+            self.assertNotIn(b'name="folder_link"', response.data)
+            self.assertNotIn(b"localStorage", response.data)
+            prepare.assert_not_called()
+            schedules = store.list_schedules()
+            self.assertEqual(schedules, [])
+
+    def test_automatic_start_and_stop_persist_server_state(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             store = app.autopost.AutopostStore(os.path.join(temp_dir, "queue.sqlite3"))
             store.initialize()
@@ -65,24 +94,47 @@ class PanelRouteTests(unittest.TestCase):
             ), patch.object(app, "prepare_schedule_content") as prepare, patch.dict(
                 os.environ, {"DRIVE_API_KEY": "test-key"}
             ):
-                response = self.client.get("/dashboard?page=automatic")
-                second_response = self.client.get("/dashboard?page=automatic")
+                prepare_event = threading.Event()
+                prepare.side_effect = lambda *args: prepare_event.set()
+                with self.client.session_transaction() as browser_session:
+                    browser_session["csrf_token"] = "automatic-test-token"
+                started = self.client.post(
+                    "/automatic/start",
+                    data={"csrf_token": "automatic-test-token"},
+                    follow_redirects=True,
+                )
+                control = store.automatic_control()
+                schedule = store.get_schedule(control["schedule_id"])
+                refreshed = self.client.get("/dashboard?page=automatic")
+                stopped = self.client.post(
+                    "/automatic/stop",
+                    data={"csrf_token": "automatic-test-token"},
+                    follow_redirects=True,
+                )
+                day, _ = store.get_day(
+                    control["schedule_id"], app.schedule_now().strftime("%Y-%m-%d")
+                )
+                control_after = store.automatic_control()
+                schedule_after = store.get_schedule(control["schedule_id"])
+                self.assertTrue(prepare_event.wait(1))
 
-            self.assertEqual(response.status_code, 200)
-            self.assertEqual(second_response.status_code, 200)
-            self.assertIn(b'data-page="automatic"', response.data)
-            self.assertIn(b"Analisando v\xc3\xaddeos... 0 de 4", response.data)
-            self.assertIn(b"At\xc3\xa9 4 v\xc3\xaddeos distintos por dia", response.data)
-            self.assertIn(b"VER PR\xc3\x89VIA", response.data)
-            self.assertNotIn(b'name="folder_link"', response.data)
-            self.assertNotIn(b"localStorage", response.data)
-            self.assertIn(b"player.controls = true", response.data)
-            self.assertIn(b"if (!modal.hidden) { queueRefresh(5000); return; }", response.data)
-            schedules = store.list_schedules()
-            self.assertEqual(len(schedules), 1)
-            self.assertEqual(schedules[0]["folder_id"], "test-folder")
-            self.assertEqual(schedules[0]["times"], ["08:00", "12:30", "18:00", "21:00"])
-            self.assertEqual(schedules[0]["videos_per_day"], 4)
+        self.assertEqual(started.status_code, 200)
+        self.assertIn(b"Status: LIGADO - postando hoje", started.data)
+        self.assertIn(b"PARAR AUTOM", started.data)
+        self.assertNotIn(b"INICIAR AUTOM", started.data)
+        self.assertIn(b"Status: LIGADO - postando hoje", refreshed.data)
+        self.assertIn(b"PARAR AUTOM", refreshed.data)
+        self.assertTrue(control["enabled"])
+        self.assertEqual(schedule["status"], "active")
+        prepare.assert_called_once()
+        self.assertEqual(stopped.status_code, 200)
+        self.assertIn(b"Status: DESLIGADO", stopped.data)
+        self.assertIn(b"INICIAR AUTOM", stopped.data)
+        self.assertNotIn(b"PARAR AUTOM", stopped.data)
+        self.assertFalse(control_after["enabled"])
+        self.assertEqual(schedule_after["status"], "paused")
+        self.assertEqual(day["status"], "paused")
+        self.assertEqual(day["progress"], 0)
 
     def test_my_cuts_remains_a_drive_library_separate_from_automatic_queue(self):
         previous_testing = app.app.testing

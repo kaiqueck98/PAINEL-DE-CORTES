@@ -75,11 +75,14 @@ IMPROVEMENT_JOBS_LOCK = threading.Lock()
 IMPROVEMENT_JOB_TTL_SECONDS = 3600
 AUTPOST_TIMEZONE_NAME = "America/Sao_Paulo"
 AUTPOST_TIMEZONE = pytz.timezone(AUTPOST_TIMEZONE_NAME)
+AUTOMATIC_SCHEDULE_TIMES = ["08:00", "12:30", "18:00", "21:00"]
+AUTOMATIC_SCHEDULE_DESTINATIONS = ["youtube", "tiktok"]
 AUTPOST_STORE = autopost.AutopostStore(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "agendamentos.sqlite3")
 )
 AUTPOST_STORE.initialize()
 AUTOMATIC_PAGE_LOCK = threading.Lock()
+AUTOMATIC_ANALYSIS_CANCEL_EVENTS = {}
 CLIPS_LIBRARY_CACHE = {}
 CLIPS_LIBRARY_CACHE_LOCK = threading.Lock()
 CLIPS_LIBRARY_CACHE_TTL = 120
@@ -1388,40 +1391,39 @@ def require_authenticated_user():
     return redirect(url_for("login"))
 
 
-def ensure_automatic_dashboard_schedule(folder_link):
-    if not folder_link:
-        return None
-    folder_id = extract_folder_id(folder_link)
-    times = ["08:00", "12:30", "18:00", "21:00"]
-    with AUTOMATIC_PAGE_LOCK:
-        schedules = AUTPOST_STORE.list_schedules()
-        schedule = next(
-            (
-                item for item in schedules
-                if item["folder_id"] == folder_id
-                and item["times"] == times
-                and item["status"] in {"draft", "active"}
-            ),
-            None,
-        )
-        if schedule:
-            return schedule
-        api_key = os.environ.get("DRIVE_API_KEY", "").strip()
-        if not api_key:
-            raise DriveError("Configure DRIVE_API_KEY para analisar a pasta.")
-        folder_name = get_folder_name(folder_id, api_key)
-        schedule_id = AUTPOST_STORE.create_schedule(
-            folder_id,
-            folder_name,
-            4,
-            times,
-            ["youtube", "tiktok"],
-            AUTPOST_TIMEZONE_NAME,
-            schedule_now().isoformat(timespec="seconds"),
-            reuse=False,
-            draft=True,
-        )
-        return AUTPOST_STORE.get_schedule(schedule_id)
+def get_automatic_dashboard_state():
+    control = AUTPOST_STORE.automatic_control()
+    schedule = (
+        AUTPOST_STORE.get_schedule(control.get("schedule_id"))
+        if control.get("schedule_id")
+        else None
+    )
+    enabled = bool(
+        control.get("enabled")
+        and schedule
+        and schedule.get("status") == "active"
+    )
+    return schedule, enabled
+
+
+def is_automatic_dashboard_schedule(schedule):
+    return bool(
+        schedule
+        and schedule.get("videos_per_day") == 4
+        and schedule.get("times") == AUTOMATIC_SCHEDULE_TIMES
+        and schedule.get("destinations") == AUTOMATIC_SCHEDULE_DESTINATIONS
+    )
+
+
+def pause_automatic_dashboard_schedules(updated_at):
+    for schedule in AUTPOST_STORE.list_schedules():
+        if not is_automatic_dashboard_schedule(schedule) or schedule.get("status") != "active":
+            continue
+        cancel_event = AUTOMATIC_ANALYSIS_CANCEL_EVENTS.pop(schedule["id"], None)
+        if cancel_event:
+            cancel_event.set()
+        AUTPOST_STORE.update_schedule_status(schedule["id"], "paused", updated_at)
+        remove_autopost_schedule_jobs(schedule["id"])
 
 
 def get_clips_library_index(folder_id, api_key):
@@ -1788,6 +1790,7 @@ def index():
     posted_filter = "all"
     folder_model = {}
     automatic_schedule = None
+    automatic_enabled = False
     automatic_script = ""
     clips_library_script = ""
     panel_stats = {"videos": 0, "folders": 0, "posted": 0}
@@ -2017,19 +2020,8 @@ def index():
 
     if dashboard_view and panel_page == "automatic":
         try:
-            automatic_schedule = ensure_automatic_dashboard_schedule(folder_link)
+            automatic_schedule, automatic_enabled = get_automatic_dashboard_state()
             if automatic_schedule:
-                today = schedule_now().strftime("%Y-%m-%d")
-                today_reviews = [
-                    review for review in AUTPOST_STORE.reviews(automatic_schedule["id"])
-                    if review["run_date"] == today
-                ]
-                if not today_reviews:
-                    threading.Thread(
-                        target=prepare_schedule_content,
-                        args=(automatic_schedule["id"],),
-                        daemon=True,
-                    ).start()
                 automatic_script = AUTOMATIC_QUEUE_SCRIPT.replace(
                     "__CONTENT_ENDPOINT__",
                     url_for("progresso_automatico", schedule_id=automatic_schedule["id"]),
@@ -2088,11 +2080,106 @@ def index():
         current_folder_name=view["folder_name"] if view else "",
         panel_stats=panel_stats,
         automatic_schedule=automatic_schedule,
+        automatic_enabled=automatic_enabled,
         automatic_script=automatic_script,
         clips_library_script=clips_library_script,
         current_folder_id=path_ids[-1] if path_ids else "",
         social_stats=social_stats,
     )
+
+
+def _valid_automatic_csrf():
+    expected = session.get("csrf_token", "")
+    supplied = request.form.get("csrf_token", "")
+    return bool(expected and supplied and secrets.compare_digest(expected, supplied))
+
+
+@app.route("/automatic/start", methods=["POST"])
+def start_automatic():
+    if not _valid_automatic_csrf():
+        flash("A sessão expirou. Atualize a página e tente novamente.", "error")
+        return redirect(url_for("dashboard", page="automatic"))
+
+    try:
+        folder_link = load_drive_folder_link()
+        if not folder_link:
+            raise ValueError("Salve a pasta principal do Drive em Configurações antes de iniciar.")
+        folder_id = extract_folder_id(folder_link)
+        api_key = os.environ.get("DRIVE_API_KEY", "").strip()
+        if not api_key:
+            raise DriveError("Configure DRIVE_API_KEY no servidor para analisar a pasta.")
+
+        times = AUTOMATIC_SCHEDULE_TIMES
+        destinations = AUTOMATIC_SCHEDULE_DESTINATIONS
+        now = schedule_now()
+        run_date = now.strftime("%Y-%m-%d")
+        updated_at = now.isoformat(timespec="seconds")
+        with AUTOMATIC_PAGE_LOCK:
+            previous_control = AUTPOST_STORE.automatic_control()
+            previous_id = previous_control.get("schedule_id")
+            previous_event = AUTOMATIC_ANALYSIS_CANCEL_EVENTS.get(previous_id)
+            if previous_event:
+                previous_event.set()
+                AUTOMATIC_ANALYSIS_CANCEL_EVENTS.pop(previous_id, None)
+            pause_automatic_dashboard_schedules(updated_at)
+
+            folder_name = get_folder_name(folder_id, api_key)
+            schedule_id = AUTPOST_STORE.create_schedule(
+                folder_id,
+                folder_name,
+                4,
+                times,
+                destinations,
+                AUTPOST_TIMEZONE_NAME,
+                updated_at,
+                reuse=False,
+                draft=False,
+            )
+            AUTPOST_STORE.reset_content_day(schedule_id, run_date, total=4)
+            AUTPOST_STORE.set_automatic_control(True, schedule_id, run_date, updated_at)
+            schedule = AUTPOST_STORE.get_schedule(schedule_id)
+            cancel_event = threading.Event()
+            AUTOMATIC_ANALYSIS_CANCEL_EVENTS[schedule_id] = cancel_event
+            if AUTPOST_SCHEDULER.running:
+                remove_autopost_schedule_jobs(schedule_id)
+                register_autopost_schedule(schedule)
+            threading.Thread(
+                target=prepare_schedule_content,
+                args=(schedule_id, cancel_event),
+                daemon=True,
+            ).start()
+        flash("Automático iniciado. Preparando os vídeos de hoje.", "success")
+    except (ValueError, DriveError, AutomationSettingsError, autopost.AutopostStoreError, OSError) as exc:
+        flash(f"Não foi possível iniciar o Automático: {exc}", "error")
+    return redirect(url_for("dashboard", page="automatic"))
+
+
+@app.route("/automatic/stop", methods=["POST"])
+def stop_automatic():
+    if not _valid_automatic_csrf():
+        flash("A sessão expirou. Atualize a página e tente novamente.", "error")
+        return redirect(url_for("dashboard", page="automatic"))
+
+    now = schedule_now()
+    run_date = now.strftime("%Y-%m-%d")
+    updated_at = now.isoformat(timespec="seconds")
+    try:
+        with AUTOMATIC_PAGE_LOCK:
+            control = AUTPOST_STORE.automatic_control()
+            schedule_id = control.get("schedule_id")
+            AUTPOST_STORE.set_automatic_control(False, schedule_id, run_date, updated_at)
+            cancel_event = AUTOMATIC_ANALYSIS_CANCEL_EVENTS.get(schedule_id)
+            if cancel_event:
+                cancel_event.set()
+                AUTOMATIC_ANALYSIS_CANCEL_EVENTS.pop(schedule_id, None)
+            if schedule_id:
+                AUTPOST_STORE.update_schedule_status(schedule_id, "paused", updated_at)
+                AUTPOST_STORE.pause_content_day(schedule_id, run_date, total=4)
+            pause_automatic_dashboard_schedules(updated_at)
+        flash("Automático parado. Os vídeos e publicações existentes foram mantidos.", "success")
+    except (ValueError, autopost.AutopostStoreError) as exc:
+        flash(f"Não foi possível parar o Automático: {exc}", "error")
+    return redirect(url_for("dashboard", page="automatic"))
 
 
 @app.route("/api/clips-library")
@@ -3211,6 +3298,12 @@ def schedule_job_id(schedule_id, slot_time):
 def register_autopost_schedule(schedule):
     if not AUTPOST_SCHEDULER.running or not schedule or schedule["status"] != "active":
         return
+    automatic_control = AUTPOST_STORE.automatic_control()
+    if is_automatic_dashboard_schedule(schedule) and (
+        automatic_control.get("schedule_id") != schedule["id"]
+        or not automatic_control.get("enabled")
+    ):
+        return
     reviews = AUTPOST_STORE.reviews(schedule['id'])
     date_fields = {}
     if reviews:
@@ -3456,12 +3549,30 @@ def select_analysis_candidates(videos, blocked_ids, limit=4):
     return [video for _, video in eligible[:limit]]
 
 
-def prepare_schedule_content(schedule_id):
+def prepare_schedule_content(schedule_id, cancel_event=None):
     """Prepara o ranking às 07:00 e ao ativar; os horários só consomem o ranking."""
     now = schedule_now()
     run_date = now.strftime('%Y-%m-%d')
     schedule = AUTPOST_STORE.get_schedule(schedule_id)
     if not schedule or schedule['status'] not in {'active', 'draft'}:
+        return
+    control = AUTPOST_STORE.automatic_control()
+    controlled = control.get("schedule_id") == schedule_id
+    dashboard_schedule = is_automatic_dashboard_schedule(schedule)
+
+    def cancelled():
+        if cancel_event and cancel_event.is_set():
+            return True
+        if not controlled:
+            return False
+        current = AUTPOST_STORE.automatic_control()
+        current_schedule = AUTPOST_STORE.get_schedule(schedule_id)
+        return not current.get("enabled") or current.get("schedule_id") != schedule_id \
+            or not current_schedule or current_schedule.get("status") != "active"
+
+    if dashboard_schedule and not controlled:
+        return
+    if controlled and cancelled():
         return
     if any(
         review["run_date"] == run_date
@@ -3469,6 +3580,8 @@ def prepare_schedule_content(schedule_id):
     ):
         return
     try:
+        if cancelled():
+            return
         if not AUTPOST_STORE.begin_listing(
             schedule_id, run_date, total=schedule["videos_per_day"]
         ):
@@ -3480,6 +3593,8 @@ def prepare_schedule_content(schedule_id):
         if not api_key:
             raise RuntimeError('Configure DRIVE_API_KEY.')
         view = get_folder_view(schedule['folder_id'], api_key)
+        if cancelled():
+            return
         if view.get('warnings'):
             raise DriveError('Listagem incompleta: ' + '; '.join(view['warnings']))
         social = load_social_posts()
@@ -3510,10 +3625,15 @@ def prepare_schedule_content(schedule_id):
             sample_download=lambda video, path, progress: download_video_sample_for_analysis(
                 video, api_key, path, progress
             ),
+            cancel_check=cancelled,
         )
+        if cancelled():
+            return
         day, _ = AUTPOST_STORE.get_day(schedule_id, run_date)
         if schedule['status'] == 'draft' and day and day["status"] == "ready":
             AUTPOST_STORE.create_review(schedule_id, run_date)
+    except autopost.AnalysisCancelledError:
+        return
     except Exception as exc:
         app.logger.error('Falha na preparação de conteúdo: %s', exc)
         try:
@@ -3536,6 +3656,12 @@ def run_schedule_slot(schedule_id, slot_time):
     claimed = False
     try:
         run_date = schedule_now().strftime("%Y-%m-%d")
+        control = AUTPOST_STORE.automatic_control()
+        schedule = AUTPOST_STORE.get_schedule(schedule_id)
+        if is_automatic_dashboard_schedule(schedule) and (
+            control.get("schedule_id") != schedule_id or not control.get("enabled")
+        ):
+            return
         reviews = [
             review for review in AUTPOST_STORE.reviews(schedule_id)
             if review["run_date"] == run_date
@@ -3547,6 +3673,15 @@ def run_schedule_slot(schedule_id, slot_time):
         if not claim:
             return
         claimed = True
+        control = AUTPOST_STORE.automatic_control()
+        if is_automatic_dashboard_schedule(claim["schedule"]) and (
+            control.get("schedule_id") != schedule_id or not control.get("enabled")
+        ):
+            AUTPOST_STORE.finish_slot(
+                schedule_id, run_date, slot_time, "cancelled",
+                "Automático parado pelo usuário.", now_text,
+            )
+            return
         if claim["limit_reached"]:
             return
 
@@ -4128,9 +4263,53 @@ AUTOMATIC_QUEUE_SCRIPT = r"""
   function render(data) {
     const days = data.content?.days || [];
     const day = days[0] || null;
+    const enabled = Boolean(data.automatic_enabled);
+    const failed = (data.content?.candidates || []).filter(video =>
+      ['error', 'excluded'].includes(String(video.status || '').toLowerCase()));
+    if (!enabled) {
+      progress.value = 0;
+      progressPercent.textContent = '0%';
+      progressLabel.textContent = 'Pausado - clique em INICIAR';
+      progressDetail.textContent = 'Fila pausada.';
+      skipped.hidden = failed.length === 0;
+      if (failed.length) {
+        skipped.querySelector('summary').textContent = `${failed.length} ${failed.length === 1 ? 'vídeo pulado' : 'vídeos pulados'} - ver detalhes`;
+        const detail = skipped.querySelector('div');
+        detail.replaceChildren();
+        for (const video of failed) {
+          const item = document.createElement('p');
+          const reason = (video.reasons || []).join(', ') || 'não foi possível preparar este vídeo';
+          item.textContent = `${video.name || 'Vídeo'}: ${reason}`;
+          detail.append(item);
+        }
+      }
+      grid.replaceChildren();
+      document.getElementById('automatic-confirm')?.remove();
+      for (let index = 0; index < 4; index++) {
+        const card = document.createElement('article');
+        card.className = 'card automatic-video-card';
+        const placeholder = document.createElement('div');
+        placeholder.className = 'queue-placeholder';
+        placeholder.textContent = 'Pausado - clique em INICIAR';
+        const title = document.createElement('h3');
+        title.textContent = 'Pausado';
+        const time = document.createElement('p');
+        time.textContent = 'Horário: ' + times[index];
+        const status = document.createElement('p');
+        status.className = 'queue-status';
+        status.textContent = 'Status: Pausado - clique em INICIAR';
+        const preview = document.createElement('button');
+        preview.type = 'button';
+        preview.textContent = 'VER PRÉVIA';
+        preview.disabled = true;
+        card.append(placeholder, title, time, status, preview);
+        grid.append(card);
+      }
+      return;
+    }
     const review = (data.reviews || []).find(item => day && item.run_date === day.run_date) || null;
     const videos = (review?.state?.videos || data.content?.videos || []).slice(0, 4);
-    const isAnalyzing = !day || ['listing', 'analyzing'].includes(day.status);
+    const isAnalyzing = !day || ['queued', 'listing', 'analyzing'].includes(day.status);
     const preparedCandidates = (data.content?.candidates || [])
       .filter(video => video.preview_available
         && !['error', 'excluded'].includes(String(video.status || '').toLowerCase())).length;
@@ -4147,8 +4326,6 @@ AUTOMATIC_QUEUE_SCRIPT = r"""
       : (isAnalyzing ? 'Preparando os vídeos para a fila de hoje...'
         : day?.status === 'error' ? 'Análise concluída com erro.'
           : percent === 100 ? 'Análise concluída.' : 'Preparando os vídeos...');
-    const failed = (data.content?.candidates || []).filter(video =>
-      ['error', 'excluded'].includes(String(video.status || '').toLowerCase()));
     skipped.hidden = failed.length === 0;
     if (failed.length) {
       skipped.querySelector('summary').textContent = `${failed.length} ${failed.length === 1 ? 'vídeo pulado' : 'vídeos pulados'} - ver detalhes`;
@@ -5051,9 +5228,11 @@ def progresso_automatico():
         return jsonify(error="Atualize a página para acompanhar o progresso."), 403
     try:
         schedule_id = request.args.get("schedule_id", "").strip()
+        control = AUTPOST_STORE.automatic_control()
         if schedule_id:
             if not re.fullmatch(r"[A-Za-z0-9_-]+", schedule_id):
                 return jsonify(error="Agendamento inválido."), 400
+            schedule = AUTPOST_STORE.get_schedule(schedule_id)
             day, selected_videos = AUTPOST_STORE.get_day(
                 schedule_id, schedule_now().strftime("%Y-%m-%d")
             )
@@ -5072,10 +5251,17 @@ def progresso_automatico():
                 row for row in AUTPOST_STORE.list_history(40)
                 if row["schedule_id"] == schedule_id
             ]
+            automatic_enabled = bool(
+                schedule
+                and control.get("schedule_id") == schedule_id
+                and control.get("enabled")
+                and schedule.get("status") == "active"
+            )
         else:
             content = AUTPOST_STORE.content_overview(schedule_now().strftime("%Y-%m-%d"))
             reviews = AUTPOST_STORE.reviews()
             history = AUTPOST_STORE.list_history(40)
+            automatic_enabled = bool(control.get("enabled"))
         for report in content['videos']:
             report['preview_available'] = bool(
                 report.get('prepared_path') and os.path.isfile(report['prepared_path'])
@@ -5096,7 +5282,8 @@ def progresso_automatico():
                 for key in ('prepared_path', 'base_prepared_path', 'analysis_frames'):
                     report.pop(key, None)
         return jsonify(history=history, warnings=automatic_warnings(),
-                       content=content, reviews=reviews, notifications=notification_overview())
+                       content=content, reviews=reviews, notifications=notification_overview(),
+                       automatic_enabled=automatic_enabled)
     except autopost.AutopostStoreError as exc:
         return jsonify(error=str(exc)), 503
 

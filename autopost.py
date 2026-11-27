@@ -1158,6 +1158,7 @@ def preparar_melhores_do_dia(
     download,
     blocked_ids: set[str],
     sample_download=None,
+    cancel_check=None,
 ) -> list[dict]:
     with _ANALYSIS_LOCK:
         return _preparar_melhores_do_dia(
@@ -1168,6 +1169,7 @@ def preparar_melhores_do_dia(
             download,
             blocked_ids,
             sample_download,
+            cancel_check,
         )
 
 
@@ -1192,7 +1194,9 @@ def _preparar_melhores_do_dia(
     download,
     blocked_ids: set[str],
     sample_download=None,
+    cancel_check=None,
 ) -> list[dict]:
+    _check_analysis_cancelled(cancel_check)
     total = len(videos)
     day, selected = store.get_day(schedule['id'], run_date)
     if day and day['status'] == 'ready':
@@ -1255,6 +1259,7 @@ def _preparar_melhores_do_dia(
             "complete": 0.82,
         }
         for index, video in enumerate(videos, 1):
+            _check_analysis_cancelled(cancel_check)
             report = {"id": video['id'], "name": video.get('name', ''), "folderName": video.get('folderName', ''),
                       "score": 0, "score_scale": 10, "reasons": [], "steps": [],
                       "message": f"Baixando vídeo {index} de {total}...",
@@ -1262,6 +1267,7 @@ def _preparar_melhores_do_dia(
                       "progress": round((index - 1) / max(total, 1) * 100)}
 
             def step(message, stage):
+                _check_analysis_cancelled(cancel_check)
                 report['message'] = message
                 report['steps'].append(message)
                 report["progress"] = round(
@@ -1279,6 +1285,7 @@ def _preparar_melhores_do_dia(
                     source = os.path.join(directory, 'analysis-sample.mp4')
                     if sample_download:
                         def sample_progress(fraction):
+                            _check_analysis_cancelled(cancel_check)
                             bounded = max(0.0, min(1.0, float(fraction)))
                             report["message"] = f"Baixando vídeo {index} de {total}..."
                             report["progress"] = round(
@@ -1293,6 +1300,7 @@ def _preparar_melhores_do_dia(
                             source,
                             lambda: sample_download(video, source, sample_progress),
                         )
+                        _check_analysis_cancelled(cancel_check)
                         report["drive_size"] = int(video.get("size", 0) or 0)
                         report["drive_duration"] = int(
                             (video.get("videoMediaMetadata") or {}).get("durationMillis", 0) or 0
@@ -1307,12 +1315,14 @@ def _preparar_melhores_do_dia(
                         report['quality'] = analisar_qualidade_amostra(source, video)
                     else:
                         download(video['id'], source)
+                        _check_analysis_cancelled(cancel_check)
                         step(f'Analisando vídeo {index} de {total}...', "analyzing")
                         report['sha256'] = hash_video(source)
                         if video_bloqueado(report):
                             raise RuntimeError('Este conteúdo já está em bloqueados.json, inclusive sob outro ID.')
                         report['quality'] = analisar_qualidade(source)
                     report['score'], report['reasons'] = pontuar_video(report['quality'])
+                    _check_analysis_cancelled(cancel_check)
                     step(
                         f"Analisando vídeo {index} de {total}: verificando qualidade e extraindo frames...",
                         "metadata",
@@ -1333,6 +1343,7 @@ def _preparar_melhores_do_dia(
                         "frames",
                     )
                     report['risk'] = verificar_riscos(report, frames)
+                    _check_analysis_cancelled(cancel_check)
                     step(
                         'Triagem: ' + ('; '.join(report['risk']['reasons']) or ('concluída' if report['risk']['checked'] else report['risk']['warning'])),
                         "risk",
@@ -1343,6 +1354,7 @@ def _preparar_melhores_do_dia(
                         "transcription",
                     )
                     report['transcription'] = transcrever_whisper(source, directory, report['quality']['has_audio'])
+                    _check_analysis_cancelled(cancel_check)
                     step(
                         "Criando título e legenda em japonês...",
                         "titles",
@@ -1359,7 +1371,10 @@ def _preparar_melhores_do_dia(
                             "complete",
                         )
                         success_count += 1
+            except AnalysisCancelledError:
+                raise
             except Exception as exc:
+                _check_analysis_cancelled(cancel_check)
                 reason = failure_reason(exc)
                 report["error_detail"] = str(exc)
                 report.update(
@@ -1378,6 +1393,7 @@ def _preparar_melhores_do_dia(
         selected, unique = [], []
         prepare_attempt = 0
         for report in sorted(analyzed, key=lambda r: (-r['score'], r['id'])):
+            _check_analysis_cancelled(cancel_check)
             if any(conteudo_repetido(report, prior) for prior in unique):
                 report.update(status='excluded', message='Duplicata de candidato com nota igual ou maior', reasons=['repetido no lote'])
             else:
@@ -1398,6 +1414,7 @@ def _preparar_melhores_do_dia(
                     store.save_candidate(schedule['id'], run_date, lease, report)
                     try:
                         def prepare_download_progress(fraction):
+                            _check_analysis_cancelled(cancel_check)
                             bounded = max(0.0, min(1.0, float(fraction)))
                             progress = round(
                                 (prep_base + bounded * 0.17 / max(prep_total, 1))
@@ -1425,6 +1442,7 @@ def _preparar_melhores_do_dia(
                             )
 
                         preparar_midia_selecionada(report, prepare_with_retry)
+                        _check_analysis_cancelled(cancel_check)
                         if report.get('improvements'):
                             report['steps'].append(
                                 'Correções automáticas: '
@@ -1432,7 +1450,10 @@ def _preparar_melhores_do_dia(
                             )
                         elif not report.get('improved'):
                             report['steps'].append('Nenhuma correção automática necessária.')
+                    except AnalysisCancelledError:
+                        raise
                     except Exception as exc:
+                        _check_analysis_cancelled(cancel_check)
                         if success_count:
                             success_count -= 1
                         error_count += 1
@@ -1475,7 +1496,10 @@ def _preparar_melhores_do_dia(
             error_count=error_count,
         )
         return selected
+    except AnalysisCancelledError:
+        raise
     except Exception as exc:
+        _check_analysis_cancelled(cancel_check)
         store.finish_day(schedule['id'], run_date, lease, [], error=str(exc))
         raise
 
@@ -1564,6 +1588,15 @@ class AutopostStoreError(Exception):
 
 class VideoDownloadError(RuntimeError):
     pass
+
+
+class AnalysisCancelledError(RuntimeError):
+    """Raised when the server-side automatic queue is stopped by the user."""
+
+
+def _check_analysis_cancelled(cancel_check):
+    if cancel_check and cancel_check():
+        raise AnalysisCancelledError("Análise pausada pelo usuário.")
 
 
 class AutopostStore:
@@ -1662,7 +1695,26 @@ class AutopostStore:
                     CREATE TABLE IF NOT EXISTS content_fingerprints (
                         sha256 TEXT PRIMARY KEY, video_id TEXT NOT NULL, report_json TEXT NOT NULL
                     );
+                    CREATE TABLE IF NOT EXISTS autopost_dashboard_control (
+                        id INTEGER PRIMARY KEY CHECK(id=1),
+                        enabled INTEGER NOT NULL DEFAULT 0,
+                        schedule_id TEXT,
+                        run_date TEXT,
+                        updated_at TEXT NOT NULL DEFAULT ''
+                    );
                     """
+                )
+                legacy_active = connection.execute(
+                    "SELECT id FROM autopost_schedules WHERE status='active' "
+                    "AND times_json=? AND destinations_json=? ORDER BY updated_at DESC LIMIT 1",
+                    (json.dumps(["08:00", "12:30", "18:00", "21:00"]),
+                     json.dumps(["youtube", "tiktok"])),
+                ).fetchone()
+                connection.execute(
+                    "INSERT OR IGNORE INTO autopost_dashboard_control "
+                    "(id, enabled, schedule_id, run_date, updated_at) VALUES (1, ?, ?, NULL, ?)",
+                    (1 if legacy_active else 0, legacy_active["id"] if legacy_active else None,
+                     datetime.now(timezone.utc).isoformat(timespec="seconds")),
                 )
                 schedule_columns = {
                     row["name"] for row in connection.execute("PRAGMA table_info(autopost_schedules)")
@@ -1701,6 +1753,80 @@ class AutopostStore:
             rows = connection.execute("SELECT report_json, selected FROM content_candidates WHERE run_date=?", (run_date,)).fetchall()
         return {"days": [{k: v for k, v in d.items() if k != 'lease'} for d in days],
                 "videos": [{**json.loads(r['report_json']), "selected": bool(r['selected'])} for r in rows]}
+
+    def automatic_control(self):
+        try:
+            with self._connection() as connection:
+                row = connection.execute(
+                    "SELECT enabled, schedule_id, run_date, updated_at "
+                    "FROM autopost_dashboard_control WHERE id=1"
+                ).fetchone()
+        except sqlite3.Error as exc:
+            raise AutopostStoreError("Não foi possível consultar o estado do Automático.") from exc
+        return dict(row) if row else {
+            "enabled": 0, "schedule_id": None, "run_date": None, "updated_at": ""
+        }
+
+    def set_automatic_control(self, enabled, schedule_id, run_date, updated_at):
+        try:
+            with self._connection() as connection:
+                connection.execute(
+                    "INSERT INTO autopost_dashboard_control "
+                    "(id, enabled, schedule_id, run_date, updated_at) VALUES (1, ?, ?, ?, ?) "
+                    "ON CONFLICT(id) DO UPDATE SET enabled=excluded.enabled, "
+                    "schedule_id=excluded.schedule_id, run_date=excluded.run_date, "
+                    "updated_at=excluded.updated_at",
+                    (1 if enabled else 0, schedule_id, run_date, updated_at),
+                )
+        except sqlite3.Error as exc:
+            raise AutopostStoreError("Não foi possível salvar o estado do Automático.") from exc
+
+    def reset_content_day(self, schedule_id, run_date, total=4):
+        now = time.time()
+        try:
+            with self._connection() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                connection.execute(
+                    "DELETE FROM content_candidates WHERE schedule_id=? AND run_date=?",
+                    (schedule_id, run_date),
+                )
+                connection.execute(
+                    "INSERT OR REPLACE INTO content_days "
+                    "(schedule_id, run_date, status, lease, updated, message, current_index, total, progress) "
+                    "VALUES (?, ?, 'queued', NULL, ?, 'Preparando uma nova análise...', 0, ?, 0)",
+                    (schedule_id, run_date, now, total),
+                )
+                connection.execute(
+                    "DELETE FROM autopost_ticks WHERE schedule_id=? AND run_date=? "
+                    "AND NOT EXISTS (SELECT 1 FROM autopost_history AS history "
+                    "WHERE history.schedule_id=autopost_ticks.schedule_id "
+                    "AND history.run_date=autopost_ticks.run_date "
+                    "AND history.run_time=autopost_ticks.run_time)",
+                    (schedule_id, run_date),
+                )
+        except sqlite3.Error as exc:
+            raise AutopostStoreError("Não foi possível reiniciar a fila de hoje.") from exc
+
+    def pause_content_day(self, schedule_id, run_date, total=4):
+        now = time.time()
+        try:
+            with self._connection() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                connection.execute(
+                    "INSERT INTO content_days "
+                    "(schedule_id, run_date, status, lease, updated, message, current_index, total, progress) "
+                    "VALUES (?, ?, 'paused', NULL, ?, 'Pausado - clique em INICIAR', 0, ?, 0) "
+                    "ON CONFLICT(schedule_id, run_date) DO UPDATE SET status='paused', lease=NULL, "
+                    "updated=excluded.updated, message=excluded.message, current_index=0, "
+                    "total=excluded.total, progress=0",
+                    (schedule_id, run_date, now, total),
+                )
+                connection.execute(
+                    "UPDATE content_candidates SET selected=0 WHERE schedule_id=? AND run_date=?",
+                    (schedule_id, run_date),
+                )
+        except sqlite3.Error as exc:
+            raise AutopostStoreError("Não foi possível pausar a fila de hoje.") from exc
 
     def latest_content(self, video_id):
         with self._connection() as connection:

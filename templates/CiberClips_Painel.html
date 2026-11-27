@@ -90,6 +90,14 @@
     .analysis-progress.is-success progress{accent-color:#22c55e}
     #automatic-queue .analysis-progress{border-color:#246c43;background:#10271a}
     #automatic-queue progress{accent-color:#22c55e}
+    .automatic-controls{display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;margin:-8px 0 20px;padding:18px;border:1px solid #292538;border-radius:14px;background:#15131e}
+    .automatic-status{margin:0;font-size:1.1rem;font-weight:800}
+    .automatic-status.is-enabled{color:#86efac}
+    .automatic-status.is-disabled{color:#fca5a5}
+    .automatic-control-form{margin:0}
+    .automatic-control-button{min-width:min(310px,100%);padding:17px 26px;font-size:1.08rem;font-weight:900;letter-spacing:.04em}
+    .automatic-control-button.start{background:#16a34a;color:#fff}
+    .automatic-control-button.stop{background:#dc2626;color:#fff}
     .automatic-video-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:15px}
     .automatic-video-card{margin:0;min-width:0}
     .automatic-video-card img{display:block;width:100%;aspect-ratio:16/9;object-fit:cover;border-radius:9px;margin:0 0 14px;background:#09080d}
@@ -322,25 +330,61 @@
         {% elif panel_page == 'automatic' %}
           <div class="banner">
             <small>FILA DE POSTAGEM</small>
-            <h1>Automático</h1>
-            <p>Até 4 vídeos distintos por dia</p>
+            <h1>Autom&aacute;tico</h1>
+            <p>At&eacute; 4 v&iacute;deos distintos por dia</p>
           </div>
+          <section class="automatic-controls" aria-live="polite">
+            <p class="automatic-status {{ 'is-enabled' if automatic_enabled else 'is-disabled' }}">
+              {{ 'Status: LIGADO - postando hoje' if automatic_enabled else 'Status: DESLIGADO' }}
+            </p>
+            {% if automatic_enabled %}
+              <form class="automatic-control-form" method="post" action="{{ url_for('stop_automatic') }}">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <button class="automatic-control-button stop" type="submit">PARAR AUTOM&Aacute;TICO</button>
+              </form>
+            {% else %}
+              <form class="automatic-control-form" method="post" action="{{ url_for('start_automatic') }}">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <button class="automatic-control-button start" type="submit">INICIAR AUTOM&Aacute;TICO</button>
+              </form>
+            {% endif %}
+          </section>
           {% if error %}<div class="message" role="alert">{{ error }}</div>{% endif %}
-          {% if not drive_link_saved %}
-            <p class="stats-empty" role="status">A fila aguarda a pasta principal salva em Configurações.</p>
-          {% elif not automatic_schedule %}
-            <section class="card" role="status"><p>A fila automática não pôde ser iniciada. Confira a configuração da pasta e tente novamente.</p></section>
-          {% else %}
+          {% if automatic_schedule %}
             <div id="automatic-queue" data-progress-url="{{ url_for('progresso_automatico', schedule_id=automatic_schedule.id) }}" data-cover-url="{{ url_for('automatic_cover', sha256='SHA') }}" aria-live="polite">
               <section class="analysis-progress">
-                <strong id="automatic-progress-label">Analisando vídeos... 0 de 4</strong>
-                <progress id="automatic-progress" max="100" value="0" aria-label="Progresso da análise"></progress>
+                <strong id="automatic-progress-label">{{ 'Analisando v&iacute;deos... 0 de 4' if automatic_enabled else 'Pausado - clique em INICIAR' }}</strong>
+                <progress id="automatic-progress" max="100" value="0" aria-label="Progresso da an&aacute;lise"></progress>
                 <strong id="automatic-progress-percent">0%</strong>
-                <p id="automatic-progress-detail">Preparando a fila de hoje...</p>
+                <p id="automatic-progress-detail">{{ 'Preparando a fila de hoje...' if automatic_enabled else 'Fila pausada.' }}</p>
               </section>
               <div id="automatic-video-grid" class="automatic-video-grid" aria-live="polite"></div>
               <details id="automatic-skipped" class="card automatic-skipped" hidden>
                 <summary></summary>
+                <div></div>
+              </details>
+            </div>
+          {% else %}
+            <div id="automatic-queue">
+              <section class="analysis-progress">
+                <strong>Pausado - clique em INICIAR</strong>
+                <progress max="100" value="0" aria-label="Progresso da an&aacute;lise"></progress>
+                <strong>0%</strong>
+                <p>Fila pausada.</p>
+              </section>
+              <div class="automatic-video-grid">
+                {% for slot in ['08:00', '12:30', '18:00', '21:00'] %}
+                  <article class="card automatic-video-card">
+                    <div class="queue-placeholder">Pausado - clique em INICIAR</div>
+                    <h3>Pausado</h3>
+                    <p>Hor&aacute;rio: {{ slot }}</p>
+                    <p class="queue-status">Status: Pausado - clique em INICIAR</p>
+                    <button type="button" disabled>VER PR&Eacute;VIA</button>
+                  </article>
+                {% endfor %}
+              </div>
+              <details class="card automatic-skipped">
+                <summary>0 v&iacute;deos pulados - ver detalhes</summary>
                 <div></div>
               </details>
             </div>
